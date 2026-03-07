@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terminals-controller
+  namespace: open-webui
+  labels:
+    app.kubernetes.io/name: terminals-controller
+    app.kubernetes.io/part-of: open-webui-terminals
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: terminals-controller
+  labels:
+    app.kubernetes.io/name: terminals-controller
+    app.kubernetes.io/part-of: open-webui-terminals
+rules:
+  # Terminal CRDs — full control
+  - apiGroups: ["open-webui.com"]
+    resources: ["terminals", "terminals/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods — create and manage terminal pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Services — create ClusterIP services for terminal pods
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Secrets — store per-terminal API keys
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # PVCs — optional persistent storage per terminal
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events — kopf posts events on handled objects
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leases — kopf leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRD discovery — kopf needs to list/watch CRDs to discover watched resources
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: terminals-controller
+  labels:
+    app.kubernetes.io/name: terminals-controller
+    app.kubernetes.io/part-of: open-webui-terminals
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: terminals-controller
+subjects:
+  - kind: ServiceAccount
+    name: terminals-controller
+    namespace: open-webui

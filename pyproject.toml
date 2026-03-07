@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-webui-terminals"
+version = "0.1.0"
+description = "Multi-tenant terminal orchestrator for Open Terminal on Kubernetes"
+readme = "README.md"
+license = "LicenseRef-Proprietary"
+requires-python = ">=3.11"
+dependencies = [
+    "kubernetes>=31.0.0",
+]
+
+[project.optional-dependencies]
+controller = [
+    "kopf>=1.37",
+]
+orchestrator = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "aiohttp>=3.10.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["terminals"]
+
+[project.scripts]
+terminals-orchestrator = "terminals.app:main"

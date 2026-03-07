@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir kopf kubernetes
+
+COPY terminals/controller.py /app/controller.py
+
+USER 65534:65534
+
+ENTRYPOINT ["kopf", "run", "/app/controller.py", "--verbose"]

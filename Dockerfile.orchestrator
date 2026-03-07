@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pyproject.toml README.md /app/
+COPY terminals/ /app/terminals/
+
+RUN pip install --no-cache-dir /app[orchestrator]
+
+USER 65534:65534
+
+EXPOSE 8080
+
+ENTRYPOINT ["python", "-m", "terminals.app"]
