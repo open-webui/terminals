@@ -1,5 +1,8 @@
 # Terminals
 
+> [!WARNING]
+> **🚧 Work in Progress** – This project is under active development and is not yet ready for production use. APIs, configuration, and features may change without notice.
+
 > **Alpha** – APIs and configuration may change.
 
 Multi-tenant terminal orchestrator for [Open Terminal](https://github.com/open-webui/open-terminal). Provisions isolated terminal instances per user with automatic lifecycle management.
