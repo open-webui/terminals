@@ -9,19 +9,17 @@ instance automatically.  The path structure mirrors open-terminal exactly
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
+import websockets
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
-from sqlalchemy import func
 
-from terminals.audit import log_audit
 from terminals.config import settings
-from terminals.db.session import async_session
-from terminals.models.tenants import Tenant, TenantStatus
-from terminals.routers.tenants import _get_tenant, _provision_tenant, validate_token, verify_api_key, verify_user_id
+from terminals.routers.auth import validate_token, verify_api_key, verify_user_id
 
 router = APIRouter()
 
@@ -78,55 +76,32 @@ def _request_id(request) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_tenant(request, user_id: str) -> Tenant:
-    """Return a running tenant, auto-provisioning if needed."""
+@dataclass
+class TenantInfo:
+    """Lightweight tenant descriptor resolved from CRDs."""
+    instance_id: str
+    host: str
+    port: int
+    api_key: str
+
+
+async def _resolve_tenant(request, user_id: str) -> TenantInfo:
+    """Return a running tenant, auto-provisioning via CRD if needed."""
     backend = request.app.state.backend
-    async with async_session() as session:
-        tenant = await _get_tenant(session, user_id)
-
-        if tenant is None:
-            tenant = await _provision_tenant(request, session, user_id)
-            return tenant
-
-        # Ensure the instance is alive.
-        if tenant.instance_id:
-            running = await backend.start(tenant.instance_id)
-            if not running:
-                # Re-provision.
-                old_instance_id = tenant.instance_id
-                await backend.teardown(tenant.instance_id)
-                info = await backend.provision(user_id)
-                tenant.instance_id = info["instance_id"]
-                tenant.instance_name = info["instance_name"]
-                tenant.api_key = info["api_key"]
-                tenant.host = info["host"]
-                tenant.port = info["port"]
-                tenant.status = TenantStatus.running
-
-                # Audit re-provision (fire-and-forget since we're not in a route).
-                try:
-                    await log_audit(
-                        action="tenant_reprovisioned",
-                        severity="warning",
-                        user_id=user_id,
-                        request_id=_request_id(request),
-                        resource_type="tenant",
-                        resource_id=tenant.instance_id,
-                        detail={
-                            "old_instance_id": old_instance_id,
-                            "new_instance_id": info["instance_id"],
-                        },
-                        ip_address=_client_ip(request),
-                    )
-                except Exception:
-                    logger.warning("Failed to audit tenant re-provision")
-
-        # Touch the access timestamp for idle tracking.
-        tenant.last_accessed_at = func.now()
-        await session.commit()
-        await session.refresh(tenant)
-
-        return tenant
+    info = await backend.ensure_terminal(user_id)
+    if info is None:
+        raise RuntimeError(f"Failed to provision terminal for user {user_id}")
+    # Touch activity so the operator knows the terminal is in use.
+    try:
+        await backend.touch_activity(user_id)
+    except Exception:
+        logger.debug("touch_activity failed for user {}", user_id)
+    return TenantInfo(
+        instance_id=info["instance_id"],
+        host=info["host"],
+        port=info["port"],
+        api_key=info["api_key"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -167,23 +142,6 @@ async def _proxy_request(
     for h in ("transfer-encoding", "connection", "content-encoding", "content-length"):
         response_headers.pop(h, None)
 
-    # Audit the proxied request.
-    severity = "warning" if upstream.status_code >= 500 else "info"
-    if background_tasks:
-        background_tasks.add_task(
-            log_audit,
-            action="proxy_request",
-            severity=severity,
-            user_id=user_id,
-            request_id=_request_id(request),
-            resource_type="proxy",
-            resource_id=tenant.instance_id,
-            detail={"method": request.method, "path": path},
-            ip_address=_client_ip(request),
-            user_agent=_user_agent(request),
-            status_code=upstream.status_code,
-        )
-
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -199,11 +157,11 @@ _SPEC_CACHE_TTL = 300  # seconds
 _cached_spec: Optional[dict] = None
 _cached_spec_ts: float = 0.0
 
-_SYSTEM_USER_ID = "__system__"
+_SYSTEM_USER_ID = "system"
 
 
 @router.get(
-    "/terminals/openapi.json",
+    "/openapi.json",
     dependencies=[Depends(verify_api_key)],
 )
 async def get_openapi_spec(request: Request):
@@ -237,6 +195,16 @@ async def get_openapi_spec(request: Request):
             status_code=502,
         )
 
+    # Strip security schemes and per-operation security requirements.
+    # Auth is handled transparently by the orchestrator proxy — the model
+    # should not see or ask for Bearer tokens.
+    spec.pop("security", None)
+    spec.get("components", {}).pop("securitySchemes", None)
+    for _path_methods in spec.get("paths", {}).values():
+        for _op in _path_methods.values():
+            if isinstance(_op, dict):
+                _op.pop("security", None)
+
     _cached_spec = spec
     _cached_spec_ts = now
 
@@ -249,7 +217,7 @@ async def get_openapi_spec(request: Request):
 
 
 @router.api_route(
-    "/terminals/{path:path}",
+    "/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
 )
 async def proxy(
@@ -272,7 +240,7 @@ async def proxy(
 # ---------------------------------------------------------------------------
 
 
-@router.websocket("/terminals/api/terminals/{session_id}")
+@router.websocket("/api/terminals/{session_id}")
 async def ws_terminal_proxy(
     ws: WebSocket,
     session_id: str,
@@ -293,25 +261,9 @@ async def ws_terminal_proxy(
             verified_user_id = await validate_token(token)
         except Exception:
             await ws.close(code=4001, reason="Invalid token")
-            await log_audit(
-                action="auth_failed",
-                severity="critical",
-                user_id=user_id or None,
-                resource_type="websocket",
-                detail={"reason": "JWT validation failed", "session_id": session_id},
-                ip_address=_client_ip(ws),
-            )
             return
     elif settings.api_key and token != settings.api_key:
         await ws.close(code=4001, reason="Invalid API key")
-        await log_audit(
-            action="auth_failed",
-            severity="critical",
-            user_id=user_id or None,
-            resource_type="websocket",
-            detail={"reason": "Invalid API key", "session_id": session_id},
-            ip_address=_client_ip(ws),
-        )
         return
 
     if not user_id:
@@ -321,36 +273,12 @@ async def ws_terminal_proxy(
     # In JWT mode, enforce that user_id matches the verified identity.
     if verified_user_id is not None and verified_user_id != user_id:
         await ws.close(code=4003, reason="user_id does not match authenticated identity")
-        await log_audit(
-            action="auth_failed",
-            severity="critical",
-            user_id=user_id,
-            resource_type="websocket",
-            detail={
-                "reason": "user_id mismatch",
-                "claimed": user_id,
-                "verified": verified_user_id,
-                "session_id": session_id,
-            },
-            ip_address=_client_ip(ws),
-        )
         return
 
     await ws.accept()
 
     global active_ws_connections
     active_ws_connections += 1
-
-    # Audit WS connect.
-    await log_audit(
-        action="ws_connect",
-        severity="info",
-        user_id=user_id,
-        resource_type="websocket",
-        resource_id=session_id,
-        ip_address=_client_ip(ws),
-        user_agent=_user_agent(ws),
-    )
 
     try:
         tenant = await _resolve_tenant(ws, user_id)
@@ -360,8 +288,6 @@ async def ws_terminal_proxy(
         return
 
     upstream_url = f"ws://{tenant.host}:{tenant.port}/api/terminals/{session_id}"
-
-    import websockets
 
     try:
         async with websockets.connect(upstream_url) as upstream:
@@ -379,8 +305,8 @@ async def ws_terminal_proxy(
                             await upstream.send(msg["bytes"])
                         elif "text" in msg and msg["text"]:
                             await upstream.send(msg["text"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("client→upstream closed: {}", e)
 
             async def _upstream_to_client():
                 """Forward upstream → client WebSocket."""
@@ -390,8 +316,8 @@ async def ws_terminal_proxy(
                             await ws.send_bytes(message)
                         else:
                             await ws.send_text(message)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("upstream→client closed: {}", e)
 
             await asyncio.gather(
                 _client_to_upstream(),
@@ -402,18 +328,6 @@ async def ws_terminal_proxy(
         logger.error("WebSocket terminal proxy error: {}", e)
     finally:
         active_ws_connections -= 1
-        # Audit WS disconnect.
-        try:
-            await log_audit(
-                action="ws_disconnect",
-                severity="info",
-                user_id=user_id,
-                resource_type="websocket",
-                resource_id=session_id,
-                ip_address=_client_ip(ws),
-            )
-        except Exception:
-            pass
         try:
             await ws.close()
         except Exception:

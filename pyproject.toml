@@ -12,15 +12,10 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "click>=8.1.0",
     "httpx>=0.27.0",
-    "aiodocker>=0.23.0",
-    "sqlalchemy[asyncio]>=2.0.0",
-    "aiosqlite>=0.21.0",
-    "alembic>=1.15.0",
     "pydantic-settings>=2.0.0",
     "websockets>=13.0",
     "loguru>=0.7.3",
     "kubernetes-asyncio>=31.0.0",
-    "cryptography>=44.0.0",
 ]
 
 [project.scripts]

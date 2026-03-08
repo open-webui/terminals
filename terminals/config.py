@@ -8,7 +8,6 @@ class Settings(BaseSettings):
 
     api_key: str = ""
     open_webui_url: str = ""  # if set, validate JWTs against this Open WebUI instance
-    database_url: str = "sqlite+aiosqlite:///./data/terminals.db"
 
     # Backend selection: "docker", "local", or "static"
     backend: str = "docker"
@@ -42,6 +41,15 @@ class Settings(BaseSettings):
     # Operator-specific settings
     kubernetes_crd_group: str = "openwebui.com"
     kubernetes_crd_version: str = "v1alpha1"
+
+    # Operator resource defaults (applied to Terminal CRs)
+    kubernetes_default_cpu_request: str = "100m"
+    kubernetes_default_cpu_limit: str = "1"
+    kubernetes_default_memory_request: str = "256Mi"
+    kubernetes_default_memory_limit: str = "1Gi"
+    kubernetes_default_idle_timeout_minutes: int = 30
+    kubernetes_default_persistence_enabled: bool = True
+    kubernetes_default_persistence_size: str = "1Gi"
 
     # Lifecycle management
     idle_timeout_seconds: int = 1800   # 30 min — stop instances idle this long
