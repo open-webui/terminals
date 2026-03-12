@@ -1,9 +1,23 @@
 # Terminals
 
 > [!NOTE]
-> This project is in **alpha**. APIs, configuration, and behavior may change between releases.
+> This project is **actively under development**. APIs, configuration, and behavior may change between releases.
 
-Multi-tenant terminal orchestrator for [Open Terminal](https://github.com/open-webui/open-terminal). Provisions isolated, policy-configured terminal instances per user.
+Per-user [Open Terminal](https://github.com/open-webui/open-terminal) orchestration for Docker and Kubernetes.
+
+Giving terminal access to users on Open WebUI requires per-user isolation: separate containers, each with their own credentials and resource constraints. Terminals handles the full lifecycle: provisioning containers on demand, proxying traffic per user, enforcing resource and network policies, validating Open WebUI JWTs natively, and cleaning up idle instances.
+
+| Capability | |
+|---|---|
+| **Backends** | Docker, Kubernetes, K8s Operator |
+| **Provisioning** | On-demand per user, transparent to the client |
+| **Policies** | Per-environment image, CPU, memory, network, env vars via REST API |
+| **Auth** | Open WebUI JWT validation or static API key |
+| **Hard caps** | Admin-enforced limits on CPU, memory, storage, and allowed images |
+| **Multi-environment** | Named policies with routing via `/p/{policy_id}/` |
+| **Network control** | Per-policy `allowed_domains` (full, restricted, or none) |
+| **Idle cleanup** | Automatic teardown of inactive instances |
+| **Runtime changes** | Update policies via API without redeployment |
 
 ## Quick Start
 
