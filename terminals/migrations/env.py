@@ -70,29 +70,24 @@ def do_run_migrations(connection):
         context.run_migrations()
 
 
-async def run_async_migrations() -> None:
-    """Run migrations in 'online' mode with an async engine."""
-    url = _get_url()
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode with a sync engine.
+
+    Alembic is called from within an already-running async event loop
+    (via ``asyncio.to_thread``), so we use a plain sync engine here to
+    avoid nested-event-loop issues with aiosqlite/asyncpg.
+    """
+    from sqlalchemy import create_engine
+
+    url = _sync_url(_get_url())
     _ensure_sqlite_dir(url)
 
-    configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = url
+    connectable = create_engine(url, poolclass=pool.NullPool)
 
-    connectable = async_engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
-
-
-def run_migrations_online() -> None:
-    """Entry point for online migrations — delegates to async runner."""
-    asyncio.run(run_async_migrations())
+    connectable.dispose()
 
 
 if context.is_offline_mode():

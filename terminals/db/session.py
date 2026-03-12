@@ -22,25 +22,26 @@ if _db_url:
     async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def init_db():
-    """Run Alembic migrations to bring the database up to date."""
+def init_db():
+    """Run Alembic migrations (sync — safe to call from any context)."""
     from alembic import command
     from alembic.config import Config
 
     alembic_cfg = Config()
-    # Locate the alembic.ini relative to the package.
     ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
     if ini_path.exists():
         alembic_cfg = Config(str(ini_path))
-    else:
-        # Fallback: configure programmatically.
-        alembic_cfg.set_main_option(
-            "script_location",
-            str(Path(__file__).resolve().parent.parent / "migrations"),
-        )
-    alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
 
-    # Run upgrade synchronously (Alembic handles async internally via env.py).
+    migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+    alembic_cfg.set_main_option("script_location", str(migrations_dir))
+
+    # Use sync URL for alembic (env.py uses sync engine).
+    sync_url = settings.database_url.replace(
+        "sqlite+aiosqlite", "sqlite"
+    ).replace(
+        "postgresql+asyncpg", "postgresql"
+    )
+    alembic_cfg.set_main_option("sqlalchemy.url", sync_url)
     command.upgrade(alembic_cfg, "head")
 
 

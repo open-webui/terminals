@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     setup_logging()
 
     # Run DB migrations
-    await init_db()
+    init_db()
 
     app.state.backend = create_backend()
     app.state.backend.start_reaper()
