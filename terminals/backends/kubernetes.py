@@ -71,14 +71,29 @@ class KubernetesBackend(Backend):
     # Backend interface
     # ------------------------------------------------------------------
 
-    async def provision(self, user_id: str) -> dict:
+    async def provision(
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        spec: dict | None = None,
+    ) -> dict:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
 
         api_key = secrets.token_urlsafe(24)
-        name = _sanitize_name(user_id)
+        base_name = _sanitize_name(user_id)
+        # Include template in resource names for multi-template support
+        tmpl_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        name = f"{base_name}-{tmpl_slug}" if policy_id != "default" else base_name
         ns = settings.kubernetes_namespace
         labels = _base_labels(user_id)
+        labels["openwebui.com/policy"] = tmpl_slug
+
+        # Resolve image and container settings from spec or defaults
+        container_spec = (spec or {}).get("container", {})
+        image = container_spec.get("image", settings.kubernetes_image)
+        sec_spec = container_spec.get("securityContext", {})
+        res_spec = container_spec.get("resources", {})
 
         # ---- Optional PVC ------------------------------------------------
         if settings.kubernetes_storage_size:
@@ -105,6 +120,29 @@ class KubernetesBackend(Backend):
                 else:
                     raise
 
+        # ---- Build K8s objects from spec ----------------------------------
+        # Security context
+        security_context = None
+        if sec_spec:
+            security_context = client.V1SecurityContext(
+                run_as_user=sec_spec.get("runAsUser"),
+                run_as_group=sec_spec.get("runAsGroup"),
+                allow_privilege_escalation=sec_spec.get("allowPrivilegeEscalation"),
+                read_only_root_filesystem=sec_spec.get("readOnlyRootFilesystem"),
+                capabilities=client.V1Capabilities(
+                    drop=sec_spec.get("capabilities", {}).get("drop"),
+                    add=sec_spec.get("capabilities", {}).get("add"),
+                ) if sec_spec.get("capabilities") else None,
+            )
+
+        # Resource requirements
+        resource_reqs = None
+        if res_spec:
+            resource_reqs = client.V1ResourceRequirements(
+                requests=res_spec.get("requests"),
+                limits=res_spec.get("limits"),
+            )
+
         # ---- Pod ---------------------------------------------------------
         volumes = []
         volume_mounts = []
@@ -127,7 +165,7 @@ class KubernetesBackend(Backend):
                 containers=[
                     client.V1Container(
                         name="open-terminal",
-                        image=settings.kubernetes_image,
+                        image=image,
                         ports=[client.V1ContainerPort(container_port=8000)],
                         env=[
                             client.V1EnvVar(
@@ -135,6 +173,8 @@ class KubernetesBackend(Backend):
                             ),
                         ],
                         volume_mounts=volume_mounts or None,
+                        security_context=security_context,
+                        resources=resource_reqs,
                         readiness_probe=client.V1Probe(
                             http_get=client.V1HTTPGetAction(
                                 path="/health", port=8000
@@ -151,7 +191,7 @@ class KubernetesBackend(Backend):
 
         try:
             created = await core.create_namespaced_pod(ns, pod)
-            log.info("Created Pod %s in %s", name, ns)
+            log.info("Created Pod %s in %s (policy=%s)", name, ns, policy_id)
         except client.exceptions.ApiException as exc:
             if exc.status == 409:
                 # Pod exists — delete and recreate.
@@ -164,11 +204,15 @@ class KubernetesBackend(Backend):
         instance_id = created.metadata.uid
 
         # ---- Service -----------------------------------------------------
+        svc_selector = {
+            "openwebui.com/user-id": user_id,
+            "openwebui.com/template": tmpl_slug,
+        }
         svc = client.V1Service(
             metadata=client.V1ObjectMeta(name=name, namespace=ns, labels=labels),
             spec=client.V1ServiceSpec(
                 type=settings.kubernetes_service_type,
-                selector={"openwebui.com/user-id": user_id},
+                selector=svc_selector,
                 ports=[
                     client.V1ServicePort(port=8000, target_port=8000),
                 ],

@@ -10,14 +10,6 @@ def create_backend() -> Backend:
         from terminals.backends.docker import DockerBackend
 
         return DockerBackend()
-    elif settings.backend == "local":
-        from terminals.backends.local import LocalBackend
-
-        return LocalBackend()
-    elif settings.backend == "static":
-        from terminals.backends.static import StaticBackend
-
-        return StaticBackend()
     elif settings.backend == "kubernetes":
         from terminals.backends.kubernetes import KubernetesBackend
 

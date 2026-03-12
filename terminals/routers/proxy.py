@@ -1,9 +1,12 @@
-"""Catch-all reverse proxy into tenant instances.
+"""Catch-all reverse proxy into terminal instances.
 
 Routing is based on the ``X-User-Id`` header — the caller (e.g. Open WebUI
 backend) sets this header and the proxy resolves / provisions the correct
 instance automatically.  The path structure mirrors open-terminal exactly
 (``/execute``, ``/files/list``, …) so the two are interchangeable.
+
+Named policy endpoints:
+  /p/{policy_id}/*  — provisions using the named policy config
 """
 
 import asyncio
@@ -14,7 +17,7 @@ from typing import Optional
 
 import httpx
 import websockets
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response, WebSocket
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -72,31 +75,35 @@ def _request_id(request) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Resolve tenant
+# Resolve instance
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class TenantInfo:
-    """Lightweight tenant descriptor resolved from CRDs."""
+class InstanceInfo:
+    """Resolved terminal instance."""
     instance_id: str
     host: str
     port: int
     api_key: str
 
 
-async def _resolve_tenant(request, user_id: str) -> TenantInfo:
-    """Return a running tenant, auto-provisioning via CRD if needed."""
+async def _resolve_instance(
+    request,
+    user_id: str,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
+) -> InstanceInfo:
+    """Return a running instance, auto-provisioning if needed."""
     backend = request.app.state.backend
-    info = await backend.ensure_terminal(user_id)
+    info = await backend.ensure_terminal(user_id, policy_id=policy_id, spec=spec)
     if info is None:
         raise RuntimeError(f"Failed to provision terminal for user {user_id}")
-    # Touch activity so the operator knows the terminal is in use.
     try:
         await backend.touch_activity(user_id)
     except Exception:
         logger.debug("touch_activity failed for user {}", user_id)
-    return TenantInfo(
+    return InstanceInfo(
         instance_id=info["instance_id"],
         host=info["host"],
         port=info["port"],
@@ -112,17 +119,21 @@ async def _resolve_tenant(request, user_id: str) -> TenantInfo:
 async def _proxy_request(
     request: Request, user_id: str, path: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
 ) -> Response:
-    """Proxy a request to the user's Open Terminal instance."""
-    tenant = await _resolve_tenant(request, user_id)
+    """Forward an HTTP request to the user's terminal instance."""
+    instance = await _resolve_instance(
+        request, user_id, policy_id=policy_id, spec=spec,
+    )
 
-    target_url = f"http://{tenant.host}:{tenant.port}/{path}"
+    target_url = f"http://{instance.host}:{instance.port}/{path}"
     if request.query_params:
         target_url += f"?{request.query_params}"
 
     headers = dict(request.headers)
     # Replace auth with the instance's own API key.
-    headers["authorization"] = f"Bearer {tenant.api_key}"
+    headers["authorization"] = f"Bearer {instance.api_key}"
     # Remove hop-by-hop / routing headers.
     for h in ("host", "transfer-encoding", "connection", "x-user-id"):
         headers.pop(h, None)
@@ -177,14 +188,14 @@ async def get_openapi_spec(request: Request):
     if _cached_spec is not None and (now - _cached_spec_ts) < _SPEC_CACHE_TTL:
         return JSONResponse(content=_cached_spec)
 
-    # Find any running tenant to fetch the spec from, or provision a system one.
-    tenant = await _resolve_tenant(request, _SYSTEM_USER_ID)
+    # Provision a system instance to fetch the spec from.
+    instance = await _resolve_instance(request, _SYSTEM_USER_ID)
 
     client = await _get_proxy_client()
     try:
         resp = await client.get(
-            f"http://{tenant.host}:{tenant.port}/openapi.json",
-            headers={"Authorization": f"Bearer {tenant.api_key}"},
+            f"http://{instance.host}:{instance.port}/openapi.json",
+            headers={"Authorization": f"Bearer {instance.api_key}"},
         )
         resp.raise_for_status()
         spec = resp.json()
@@ -212,7 +223,89 @@ async def get_openapi_spec(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Header-based catch-all proxy (primary integration point)
+# Named policy proxy — /p/{policy_id}/{path}
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
+    """Look up a policy by ID. Returns (policy_id, merged spec) or raises 404."""
+    from terminals.db.session import async_session as db_session
+
+    if db_session is None:
+        return policy_id, None
+
+    from terminals.models.policy import Policy
+    from terminals.routers.policy import _merge_defaults
+
+    async with db_session() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(Policy).where(Policy.id == policy_id))
+        policy = result.scalar_one_or_none()
+        if policy is None:
+            raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+
+        return policy_id, _merge_defaults(policy.data or {})
+
+
+@router.get(
+    "/p/{policy_id}/openapi.json",
+    dependencies=[Depends(verify_api_key)],
+)
+async def policy_openapi_spec(
+    policy_id: str,
+    request: Request,
+):
+    """Serve the OpenAPI spec via a named policy container."""
+    _id, spec = await _resolve_policy_spec(policy_id)
+    instance = await _resolve_instance(request, _SYSTEM_USER_ID, policy_id=_id, spec=spec)
+
+    client = await _get_proxy_client()
+    try:
+        resp = await client.get(
+            f"http://{instance.host}:{instance.port}/openapi.json",
+            headers={"Authorization": f"Bearer {instance.api_key}"},
+        )
+        resp.raise_for_status()
+        spec_data = resp.json()
+    except Exception as e:
+        logger.error("Failed to fetch OpenAPI spec from policy instance: {}", e)
+        return JSONResponse(
+            content={"error": "Failed to fetch OpenAPI spec"},
+            status_code=502,
+        )
+
+    # Strip auth from spec — orchestrator handles auth transparently.
+    spec_data.pop("security", None)
+    spec_data.get("components", {}).pop("securitySchemes", None)
+    for _path_methods in spec_data.get("paths", {}).values():
+        for _op in _path_methods.values():
+            if isinstance(_op, dict):
+                _op.pop("security", None)
+
+    return JSONResponse(content=spec_data)
+
+
+@router.api_route(
+    "/p/{policy_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def policy_proxy(
+    policy_id: str,
+    path: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_user_id: str = Depends(verify_user_id),
+):
+    """Proxy a request through a named policy endpoint."""
+    _id, spec = await _resolve_policy_spec(policy_id)
+    return await _proxy_request(
+        request, x_user_id, path, background_tasks,
+        policy_id=_id, spec=spec,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Header-based catch-all proxy — default endpoint (backward compat)
 # ---------------------------------------------------------------------------
 
 
@@ -228,9 +321,7 @@ async def proxy(
 ):
     """Reverse-proxy any request into the user's Open Terminal instance.
 
-    The target user is identified by the ``X-User-Id`` header.  The path
-    structure mirrors the open-terminal API exactly so the two backends
-    are fully interchangeable from the caller's perspective.
+    Uses settings.* defaults — no policy lookup.
     """
     return await _proxy_request(request, x_user_id, path, background_tasks)
 
@@ -240,62 +331,64 @@ async def proxy(
 # ---------------------------------------------------------------------------
 
 
-@router.websocket("/api/terminals/{session_id}")
-async def ws_terminal_proxy(
-    ws: WebSocket,
-    session_id: str,
-    token: str = Query(""),
-    user_id: str = Query(""),
-):
-    """Proxy a WebSocket terminal session to the user's Open Terminal instance.
+async def _validate_ws_auth(
+    ws: WebSocket, token: str, user_id: str
+) -> Optional[str]:
+    """Validate WS auth, return verified user_id or close the socket.
 
-    Authentication is via the ``token`` query parameter (validated against
-    the orchestrator API key).  The ``user_id`` query param identifies the
-    target tenant (equivalent to the ``X-User-Id`` header used by HTTP routes).
+    Returns the effective user_id on success, or ``None`` if closed.
     """
-    # Validate token — support JWT (Open WebUI) and API key modes.
     verified_user_id = None
     if settings.open_webui_url:
-        # JWT mode — validate against Open WebUI and extract verified identity.
         try:
             verified_user_id = await validate_token(token)
         except Exception:
             await ws.close(code=4001, reason="Invalid token")
-            return
+            return None
     elif settings.api_key and token != settings.api_key:
         await ws.close(code=4001, reason="Invalid API key")
-        return
+        return None
 
     if not user_id:
         await ws.close(code=4002, reason="Missing user_id")
-        return
+        return None
 
-    # In JWT mode, enforce that user_id matches the verified identity.
     if verified_user_id is not None and verified_user_id != user_id:
         await ws.close(code=4003, reason="user_id does not match authenticated identity")
-        return
+        return None
 
+    return user_id
+
+
+async def _ws_proxy_handler(
+    ws: WebSocket,
+    session_id: str,
+    user_id: str,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
+):
+    """Core WebSocket proxy logic, shared by default and policy routes."""
     await ws.accept()
 
     global active_ws_connections
     active_ws_connections += 1
 
     try:
-        tenant = await _resolve_tenant(ws, user_id)
+        instance = await _resolve_instance(
+            ws, user_id, policy_id=policy_id, spec=spec
+        )
     except Exception as e:
-        logger.error("Failed to resolve tenant for WS: {}", e)
+        logger.error("Failed to resolve instance for WS: {}", e)
         await ws.close(code=4003, reason="Failed to resolve terminal instance")
         return
 
-    upstream_url = f"ws://{tenant.host}:{tenant.port}/api/terminals/{session_id}"
+    upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
 
     try:
         async with websockets.connect(upstream_url) as upstream:
-            # First-message auth to upstream
-            await upstream.send(json.dumps({"type": "auth", "token": tenant.api_key}))
+            await upstream.send(json.dumps({"type": "auth", "token": instance.api_key}))
 
             async def _client_to_upstream():
-                """Forward client WebSocket → upstream."""
                 try:
                     while True:
                         msg = await ws.receive()
@@ -309,7 +402,6 @@ async def ws_terminal_proxy(
                     logger.debug("client→upstream closed: {}", e)
 
             async def _upstream_to_client():
-                """Forward upstream → client WebSocket."""
                 try:
                     async for message in upstream:
                         if isinstance(message, bytes):
@@ -332,3 +424,41 @@ async def ws_terminal_proxy(
             await ws.close()
         except Exception:
             pass
+
+
+@router.websocket("/api/terminals/{session_id}")
+async def ws_terminal_proxy(
+    ws: WebSocket,
+    session_id: str,
+    token: str = Query(""),
+    user_id: str = Query(""),
+):
+    """Default WebSocket terminal proxy (no policy)."""
+    effective_user = await _validate_ws_auth(ws, token, user_id)
+    if effective_user is None:
+        return
+    await _ws_proxy_handler(ws, session_id, effective_user)
+
+
+@router.websocket("/p/{policy_id}/api/terminals/{session_id}")
+async def ws_policy_terminal_proxy(
+    ws: WebSocket,
+    policy_id: str,
+    session_id: str,
+    token: str = Query(""),
+    user_id: str = Query(""),
+):
+    """Policy-scoped WebSocket terminal proxy."""
+    effective_user = await _validate_ws_auth(ws, token, user_id)
+    if effective_user is None:
+        return
+
+    try:
+        _id, spec = await _resolve_policy_spec(policy_id)
+    except HTTPException:
+        await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
+        return
+
+    await _ws_proxy_handler(ws, session_id, effective_user, policy_id=_id, spec=spec)
+
+

@@ -1,114 +1,93 @@
 # Terminals
 
-> [!WARNING]
-> **🚧 Work in Progress** – This project is under active development and is not yet ready for production use. APIs, configuration, and features may change without notice.
+> [!NOTE]
+> This project is in **alpha**. APIs, configuration, and behavior may change between releases.
 
-> **Alpha** – APIs and configuration may change.
+Multi-tenant terminal orchestrator for [Open Terminal](https://github.com/open-webui/open-terminal). Provisions isolated, policy-configured terminal instances per user.
 
-Multi-tenant terminal orchestrator for [Open Terminal](https://github.com/open-webui/open-terminal). Provisions isolated terminal instances per user with automatic lifecycle management.
-
-## Getting Started
-
-### Install & Run
+## Quick Start
 
 ```bash
 pip install -e .
 terminals serve
 ```
 
-The server starts on `http://0.0.0.0:3000`. An API key is auto-generated and printed to the console.
-
-### Docker
+Or with Docker:
 
 ```bash
-docker build -t terminals .
 docker run -p 3000:3000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v $(pwd)/data:/app/data \
   terminals
 ```
 
-### Development
+## Policies
+
+Policies define per-environment configuration. Manage via REST API:
 
 ```bash
-uv sync
-./dev.sh  # uvicorn with --reload
+curl -X PUT http://localhost:3000/api/v1/policies/data-science \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "ghcr.io/open-webui/open-terminal:python-ds",
+    "cpu_limit": "2",
+    "memory_limit": "4Gi",
+    "env": {"OPENAI_API_KEY": "sk-proj-..."},
+    "allowed_domains": ["*.pypi.org", "github.com"],
+    "idle_timeout_minutes": 30
+  }'
 ```
 
-Frontend (admin dashboard):
+Route requests through a policy via `/p/{policy_id}/`:
 
 ```bash
-cd terminals/frontend
-npm install && npm run dev
-```
-
-## Usage
-
-All Open Terminal endpoints are available under `/terminals/`. Include `X-User-Id` to identify the user.
-
-```bash
-export API_KEY="<api-key>"
-export HEADERS=(-H "Authorization: Bearer $API_KEY" -H "X-User-Id: user-123")
-
-curl -X POST http://localhost:3000/terminals/execute \
-  "${HEADERS[@]}" -H "Content-Type: application/json" \
+curl -X POST http://localhost:3000/p/data-science/execute \
+  -H "Authorization: Bearer $API_KEY" -H "X-User-Id: user-123" \
+  -H "Content-Type: application/json" \
   -d '{"command": "echo hello"}'
-
-curl http://localhost:3000/terminals/files/list "${HEADERS[@]}"
-
-curl "http://localhost:3000/terminals/files/read?path=README.md" "${HEADERS[@]}"
 ```
 
-Interactive terminal sessions connect via WebSocket at `/terminals/api/terminals/{session_id}`. Admins can manage tenants via `/api/v1/tenants/`.
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | string | Container image |
+| `env` | dict | Environment variables |
+| `cpu_limit` | string | Max CPU (e.g. `"2"`) |
+| `memory_limit` | string | Max memory (e.g. `"4Gi"`) |
+| `storage` | string | Persistent volume size (absent = ephemeral) |
+| `allowed_domains` | list | `["*"]` = full, `[]` = none, `["*.pypi.org"]` = restricted |
+| `idle_timeout_minutes` | int | Idle timeout before cleanup |
 
 ## Configuration
 
-Settings are loaded from environment variables prefixed with `TERMINALS_` (or a `.env` file).
+Environment variables prefixed with `TERMINALS_` (or `.env` file).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, `kubernetes-operator`, `local`, `static` |
-| `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
+| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, `kubernetes-operator` |
+| `TERMINALS_API_KEY` | *(auto)* | Bearer token for API auth |
 | `TERMINALS_OPEN_WEBUI_URL` | | Open WebUI URL for JWT auth |
-| `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///./data/terminals.db` | SQLAlchemy async URL |
-| `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Docker/K8s container image |
-| `TERMINALS_IDLE_TIMEOUT_SECONDS` | `1800` | Stop idle instances (0 = disabled) |
-| `TERMINALS_PORT` | `3000` | Server port |
+| `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
+| `TERMINALS_MAX_CPU` | | Hard cap on CPU |
+| `TERMINALS_MAX_MEMORY` | | Hard cap on memory |
+| `TERMINALS_MAX_STORAGE` | | Hard cap on storage |
+| `TERMINALS_ALLOWED_IMAGES` | | Comma-separated image globs |
 
-See [`config.py`](terminals/config.py) for the full list including Kubernetes, static backend, and encryption settings.
+See [`config.py`](terminals/config.py) for the full list.
 
 ## Authentication
 
-| Mode | Trigger | How it works |
-|------|---------|-------------|
-| **Open WebUI JWT** | Set `TERMINALS_OPEN_WEBUI_URL` | Validates tokens against Open WebUI |
-| **API Key** | Set `TERMINALS_API_KEY` | Static bearer token |
-| **Open** | Neither set | No auth (development only) |
+| Mode | Trigger |
+|------|---------|
+| **Open WebUI JWT** | Set `TERMINALS_OPEN_WEBUI_URL` |
+| **API Key** | Set `TERMINALS_API_KEY` |
+| **Open** | Neither set (dev only) |
 
 ## Backends
 
 - **`docker`** – One container per user via Docker socket
-- **`kubernetes`** – Pod + PVC + Service per user via K8s API
-- **`kubernetes-operator`** – Delegates to a Kopf operator watching `Terminal` CRDs
-- **`local`** – Spawns `open-terminal` as a subprocess (dev/testing)
-- **`static`** – Proxies all users to a single pre-running instance
-
-## Database
-
-SQLite works out of the box. For PostgreSQL:
-
-```bash
-pip install asyncpg
-export TERMINALS_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/terminals
-```
-
-Migrations run automatically on startup. Manual management:
-
-```bash
-terminals db upgrade          # run pending migrations
-terminals db current          # show revision
-terminals db revision -m "msg"  # create migration
-```
+- **`kubernetes`** – Pod + PVC + Service per user
+- **`kubernetes-operator`** – Kopf operator watching `Terminal` CRDs
 
 ## License
 

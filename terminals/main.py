@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from terminals.backends import create_backend
 from terminals.config import settings
+from terminals.db.session import close_db, init_db
 from terminals.logging import setup_logging
 from terminals.middleware import RequestIdMiddleware
 from terminals.routers.proxy import close_proxy_client, router as proxy_router
@@ -19,12 +20,16 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     setup_logging()
 
+    # Run DB migrations
+    await init_db()
+
     app.state.backend = create_backend()
 
     yield
 
     await close_proxy_client()
     await app.state.backend.close()
+    await close_db()
 
 
 app = FastAPI(
@@ -49,7 +54,12 @@ async def health():
     return {"status": True}
 
 
-# Catch-all proxy router must be last so /health is matched first.
+from terminals.routers.policy import router as policy_router
+
+# Policy CRUD must be before the catch-all proxy.
+app.include_router(policy_router)
+
+# Catch-all proxy router must be last so /health and /api are matched first.
 app.include_router(proxy_router)
 
 
