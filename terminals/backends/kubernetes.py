@@ -1,5 +1,6 @@
 """Kubernetes backend — provisions Open Terminal as Pods via the K8s API."""
 
+import asyncio
 import logging
 import re
 import secrets
@@ -56,6 +57,7 @@ class KubernetesBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
+        self._uid_cache: dict[str, str] = {}  # uid → pod name
 
     async def _ensure_client(self) -> ApiClient:
         if self._api_client is None:
@@ -177,7 +179,7 @@ class KubernetesBackend(Backend):
                 )
 
             elif storage_mode == "shared-rwo":
-                # Single RWO PVC, all pods on same node via affinity
+                # Single RWO PVC, all pods on same node
                 await self._ensure_shared_pvc(core, ns, shared_pvc_name, storage_size, "ReadWriteOnce")
                 volumes.append(
                     client.V1Volume(
@@ -193,21 +195,6 @@ class KubernetesBackend(Backend):
                         mount_path="/home/user",
                         sub_path=user_id,
                     ),
-                )
-                # Pin all terminal pods to the same node as the PVC
-                affinity = client.V1Affinity(
-                    pod_affinity=client.V1PodAffinity(
-                        required_during_scheduling_ignored_during_execution=[
-                            client.V1PodAffinityTerm(
-                                label_selector=client.V1LabelSelector(
-                                    match_labels={
-                                        "app.kubernetes.io/managed-by": "terminals",
-                                    }
-                                ),
-                                topology_key="kubernetes.io/hostname",
-                            )
-                        ]
-                    )
                 )
 
         # ---- Pod ---------------------------------------------------------
@@ -249,11 +236,13 @@ class KubernetesBackend(Backend):
             if exc.status == 409:
                 log.info("Pod %s already exists, replacing", name)
                 await core.delete_namespaced_pod(name, ns)
+                await self._wait_for_pod_deletion(core, name, ns)
                 created = await core.create_namespaced_pod(ns, pod)
             else:
                 raise
 
         instance_id = created.metadata.uid
+        self._uid_cache[instance_id] = name
 
         # ---- Service -----------------------------------------------------
         svc = client.V1Service(
@@ -297,7 +286,6 @@ class KubernetesBackend(Backend):
         timeout: int = 60,
     ) -> None:
         """Poll until the pod's readiness probe passes."""
-        import asyncio
 
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
@@ -361,8 +349,16 @@ class KubernetesBackend(Backend):
             phase = pod.status.phase  # Pending, Running, Succeeded, Failed, Unknown
             if phase == "Running":
                 return "running"
-            if phase in ("Pending",):
-                return "running"  # still starting up
+            if phase == "Pending":
+                # Check if truly starting vs stuck (unschedulable, image pull error, etc.)
+                conditions = pod.status.conditions or []
+                for c in conditions:
+                    if c.type == "PodScheduled" and c.status == "False":
+                        if c.reason == "Unschedulable":
+                            log.warning("Pod %s is unschedulable: %s", name, c.message)
+                            return "stopped"
+                # Still pulling or initializing — treat as starting.
+                return "running"
             return "stopped"
         except client.exceptions.ApiException:
             return "missing"
@@ -373,11 +369,84 @@ class KubernetesBackend(Backend):
             self._api_client = None
 
     # ------------------------------------------------------------------
+    # Reconciliation — rediscover running pods on startup
+    # ------------------------------------------------------------------
+
+    async def reconcile(self) -> None:
+        """Scan running K8s pods and repopulate ``_instances``.
+
+        Called during startup to recover state after a restart.
+        Reads user_id and policy from pod labels, and the API key
+        from the pod's env vars.
+        """
+        api_client = await self._ensure_client()
+        core = client.CoreV1Api(api_client)
+        ns = settings.kubernetes_namespace
+
+        try:
+            pods = await core.list_namespaced_pod(
+                ns, label_selector="app.kubernetes.io/managed-by=terminals"
+            )
+        except client.exceptions.ApiException:
+            log.warning("Failed to list pods for reconciliation")
+            return
+
+        recovered = 0
+        for pod in pods.items:
+            if pod.status.phase not in ("Running", "Pending"):
+                continue
+
+            labels = pod.metadata.labels or {}
+            user_id = labels.get("openwebui.com/user-id")
+            policy_slug = labels.get("openwebui.com/policy", "default")
+            if not user_id:
+                continue
+
+            uid = pod.metadata.uid
+            name = pod.metadata.name
+            self._uid_cache[uid] = name
+
+            key = self._key(user_id, policy_slug)
+            if key in self._instances:
+                continue
+
+            # Extract API key from pod env
+            api_key = None
+            for container in pod.spec.containers:
+                for env in (container.env or []):
+                    if env.name == "OPEN_TERMINAL_API_KEY" and env.value:
+                        api_key = env.value
+                        break
+                if api_key:
+                    break
+
+            if not api_key:
+                log.debug("Pod %s has no API key, skipping", name)
+                continue
+
+            host = f"{name}.{ns}.svc.cluster.local"
+            self._instances[key] = {
+                "instance_id": uid,
+                "instance_name": name,
+                "api_key": api_key,
+                "host": host,
+                "port": 8000,
+            }
+            self._activity[key] = __import__("time").monotonic()
+            recovered += 1
+
+        if recovered:
+            log.info("Reconciled %d running pod(s)", recovered)
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     async def _name_from_uid(self, uid: str) -> Optional[str]:
-        """Look up a Pod name by its UID."""
+        """Look up a Pod name by its UID (cached)."""
+        if uid in self._uid_cache:
+            return self._uid_cache[uid]
+
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         ns = settings.kubernetes_namespace
@@ -387,11 +456,27 @@ class KubernetesBackend(Backend):
                 ns, label_selector="app.kubernetes.io/managed-by=terminals"
             )
             for pod in pods.items:
+                self._uid_cache[pod.metadata.uid] = pod.metadata.name
                 if pod.metadata.uid == uid:
                     return pod.metadata.name
         except client.exceptions.ApiException:
             pass
         return None
+
+    async def _wait_for_pod_deletion(
+        self, core: client.CoreV1Api, name: str, ns: str, timeout: int = 30,
+    ) -> None:
+        """Wait until a pod is fully deleted."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await core.read_namespaced_pod(name, ns)
+            except client.exceptions.ApiException as e:
+                if e.status == 404:
+                    return
+                raise
+            await asyncio.sleep(0.5)
+        log.warning("Pod %s not fully deleted after %ds", name, timeout)
 
     async def _ensure_shared_pvc(
         self,
