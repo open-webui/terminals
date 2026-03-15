@@ -18,7 +18,7 @@ from typing import Optional
 import httpx
 import websockets
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from terminals.config import settings
@@ -122,7 +122,11 @@ async def _proxy_request(
     policy_id: str = "default",
     spec: Optional[dict] = None,
 ) -> Response:
-    """Forward an HTTP request to the user's terminal instance."""
+    """Forward an HTTP request to the user's terminal instance.
+
+    Streams both the request body (upload) and response body (download)
+    to avoid buffering large payloads in memory.
+    """
     instance = await _resolve_instance(
         request, user_id, policy_id=policy_id, spec=spec,
     )
@@ -138,6 +142,7 @@ async def _proxy_request(
     for h in ("host", "transfer-encoding", "connection", "x-user-id"):
         headers.pop(h, None)
 
+    # Read the request body upfront (needed for retries).
     body = await request.body()
 
     client = await _get_proxy_client()
@@ -146,11 +151,14 @@ async def _proxy_request(
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            upstream = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                content=body,
+            upstream_resp = await client.send(
+                client.build_request(
+                    method=request.method,
+                    url=target_url,
+                    headers=headers,
+                    content=body,
+                ),
+                stream=True,
             )
             break
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
@@ -160,20 +168,21 @@ async def _proxy_request(
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
-                    content=f'{{"error": "Terminal instance not reachable"}}',
+                    content='{"error": "Terminal instance not reachable"}',
                     status_code=502,
                     media_type="application/json",
                 )
 
-    # Strip hop-by-hop from response too.
-    response_headers = dict(upstream.headers)
-    for h in ("transfer-encoding", "connection", "content-encoding", "content-length"):
+    # Strip hop-by-hop from response.
+    response_headers = dict(upstream_resp.headers)
+    for h in ("transfer-encoding", "connection", "content-encoding"):
         response_headers.pop(h, None)
 
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
+    return StreamingResponse(
+        content=upstream_resp.aiter_bytes(),
+        status_code=upstream_resp.status_code,
         headers=response_headers,
+        background=BackgroundTasks([upstream_resp.aclose]),
     )
 
 
@@ -182,8 +191,7 @@ async def _proxy_request(
 # ---------------------------------------------------------------------------
 
 _SPEC_CACHE_TTL = 300  # seconds
-_cached_spec: Optional[dict] = None
-_cached_spec_ts: float = 0.0
+_spec_cache: dict[str, tuple[float, dict]] = {}  # key → (timestamp, spec)
 
 _SYSTEM_USER_ID = "system"
 
@@ -216,14 +224,49 @@ async def _fetch_spec_with_retry(instance: InstanceInfo) -> dict:
     raise last_err
 
 
-def _strip_auth_from_spec(spec: dict) -> None:
-    """Remove security schemes — auth is handled transparently by the proxy."""
+def _strip_auth_from_spec(spec: dict) -> dict:
+    """Remove security schemes — auth is handled transparently by the proxy.
+
+    Returns a shallow copy to avoid mutating the cached dict.
+    """
+    spec = {**spec}
     spec.pop("security", None)
-    spec.get("components", {}).pop("securitySchemes", None)
-    for _path_methods in spec.get("paths", {}).values():
-        for _op in _path_methods.values():
-            if isinstance(_op, dict):
-                _op.pop("security", None)
+    components = spec.get("components")
+    if components:
+        spec["components"] = {**components}
+        spec["components"].pop("securitySchemes", None)
+    paths = spec.get("paths")
+    if paths:
+        new_paths = {}
+        for path_key, path_methods in paths.items():
+            new_methods = {}
+            for method, op in path_methods.items():
+                if isinstance(op, dict) and "security" in op:
+                    op = {k: v for k, v in op.items() if k != "security"}
+                new_methods[method] = op
+            new_paths[path_key] = new_methods
+        spec["paths"] = new_paths
+    return spec
+
+
+async def _get_cached_spec(
+    request: Request,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
+) -> dict:
+    """Return cached OpenAPI spec, fetching from a system instance if stale."""
+    now = time.monotonic()
+    cached = _spec_cache.get(policy_id)
+    if cached and (now - cached[0]) < _SPEC_CACHE_TTL:
+        return cached[1]
+
+    instance = await _resolve_instance(
+        request, _SYSTEM_USER_ID, policy_id=policy_id, spec=spec,
+    )
+    raw = await _fetch_spec_with_retry(instance)
+    stripped = _strip_auth_from_spec(raw)
+    _spec_cache[policy_id] = (now, stripped)
+    return stripped
 
 
 @router.get(
@@ -237,29 +280,14 @@ async def get_openapi_spec(request: Request):
     This endpoint does **not** require ``X-User-Id`` — it is used by
     Open WebUI for tool discovery before any user context exists.
     """
-    global _cached_spec, _cached_spec_ts
-
-    now = time.monotonic()
-    if _cached_spec is not None and (now - _cached_spec_ts) < _SPEC_CACHE_TTL:
-        return JSONResponse(content=_cached_spec)
-
-    # Provision a system instance to fetch the spec from.
-    instance = await _resolve_instance(request, _SYSTEM_USER_ID)
-
     try:
-        spec = await _fetch_spec_with_retry(instance)
+        spec = await _get_cached_spec(request)
     except Exception as e:
         logger.error("Failed to fetch OpenAPI spec from instance: {}", e)
         return JSONResponse(
             content={"error": "Failed to fetch OpenAPI spec from terminal instance"},
             status_code=502,
         )
-
-    _strip_auth_from_spec(spec)
-
-    _cached_spec = spec
-    _cached_spec_ts = now
-
     return JSONResponse(content=spec)
 
 
@@ -267,25 +295,37 @@ async def get_openapi_spec(request: Request):
 # Named policy proxy — /p/{policy_id}/{path}
 # ---------------------------------------------------------------------------
 
+_POLICY_CACHE_TTL = 60  # seconds
+_policy_cache: dict[str, tuple[float, tuple[str, dict | None]]] = {}
+
 
 async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
-    """Look up a policy by ID. Returns (policy_id, merged spec) or raises 404."""
+    """Look up a policy by ID (cached for 60s). Returns (policy_id, merged spec)."""
+    now = time.monotonic()
+    cached = _policy_cache.get(policy_id)
+    if cached and (now - cached[0]) < _POLICY_CACHE_TTL:
+        return cached[1]
+
     from terminals.db.session import async_session as db_session
 
     if db_session is None:
-        return policy_id, None
+        result = (policy_id, None)
+        _policy_cache[policy_id] = (now, result)
+        return result
 
     from terminals.models.policy import Policy
     from terminals.routers.policy import _merge_defaults
 
     async with db_session() as session:
         from sqlalchemy import select
-        result = await session.execute(select(Policy).where(Policy.id == policy_id))
-        policy = result.scalar_one_or_none()
+        row = await session.execute(select(Policy).where(Policy.id == policy_id))
+        policy = row.scalar_one_or_none()
         if policy is None:
             raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
 
-        return policy_id, _merge_defaults(policy.data or {})
+        result = (policy_id, _merge_defaults(policy.data or {}))
+        _policy_cache[policy_id] = (now, result)
+        return result
 
 
 @router.get(
@@ -296,20 +336,17 @@ async def policy_openapi_spec(
     policy_id: str,
     request: Request,
 ):
-    """Serve the OpenAPI spec via a named policy container."""
+    """Serve the OpenAPI spec via a named policy container (cached)."""
     _id, spec = await _resolve_policy_spec(policy_id)
-    instance = await _resolve_instance(request, _SYSTEM_USER_ID, policy_id=_id, spec=spec)
 
     try:
-        spec_data = await _fetch_spec_with_retry(instance)
+        spec_data = await _get_cached_spec(request, policy_id=_id, spec=spec)
     except Exception as e:
         logger.error("Failed to fetch OpenAPI spec from policy instance: {}", e)
         return JSONResponse(
             content={"error": "Failed to fetch OpenAPI spec"},
             status_code=502,
         )
-
-    _strip_auth_from_spec(spec_data)
 
     return JSONResponse(content=spec_data)
 

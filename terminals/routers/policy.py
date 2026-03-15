@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from terminals.config import settings
 from terminals.db.session import async_session
 from terminals.routers.auth import verify_api_key
+from terminals.utils.parsing import parse_size
 
 router = APIRouter(prefix="/api/v1", tags=["policies"])
 
@@ -46,16 +47,6 @@ class PolicyCreate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parse_size(value: str) -> int:
-    """Parse K8s-style size string to bytes. '512Mi' -> 536870912."""
-    import re
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*(Ki|Mi|Gi|Ti)?$", str(value).strip())
-    if not m:
-        return int(value)
-    num, suffix = float(m.group(1)), m.group(2) or ""
-    mult = {"": 1, "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-    return int(num * mult[suffix])
-
 
 def _clamp_policy(data: dict) -> dict:
     """Clamp policy values against env var hard caps."""
@@ -72,7 +63,7 @@ def _clamp_policy(data: dict) -> dict:
     # Clamp memory
     if settings.max_memory and "memory_limit" in result:
         try:
-            if _parse_size(result["memory_limit"]) > _parse_size(settings.max_memory):
+            if parse_size(result["memory_limit"]) > parse_size(settings.max_memory):
                 result["memory_limit"] = settings.max_memory
         except Exception:
             pass
@@ -80,7 +71,7 @@ def _clamp_policy(data: dict) -> dict:
     # Clamp storage
     if settings.max_storage and "storage" in result:
         try:
-            if _parse_size(result["storage"]) > _parse_size(settings.max_storage):
+            if parse_size(result["storage"]) > parse_size(settings.max_storage):
                 result["storage"] = settings.max_storage
         except Exception:
             pass

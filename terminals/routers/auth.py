@@ -17,6 +17,13 @@ async def _get_owui_client() -> httpx.AsyncClient:
     return _owui_client
 
 
+async def close_auth_client() -> None:
+    global _owui_client
+    if _owui_client is not None:
+        await _owui_client.aclose()
+        _owui_client = None
+
+
 async def validate_token(token: str) -> Optional[str]:
     """Validate a bearer token against the Open WebUI instance.
 

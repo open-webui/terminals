@@ -204,3 +204,4 @@ class Backend(ABC):
                 self._instances.pop(key, None)
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
+                self._locks.pop(key, None)

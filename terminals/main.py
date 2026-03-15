@@ -10,6 +10,7 @@ from terminals.config import settings
 from terminals.db.session import close_db, init_db
 from terminals.logging import setup_logging
 from terminals.middleware import RequestIdMiddleware
+from terminals.routers.auth import close_auth_client
 from terminals.routers.proxy import close_proxy_client, router as proxy_router
 
 
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
 
     await app.state.backend.stop_reaper()
     await close_proxy_client()
+    await close_auth_client()
     await app.state.backend.close()
     await close_db()
 

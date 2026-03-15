@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import secrets
+import time
 from typing import Optional
 
 from kubernetes_asyncio import client, config
@@ -435,7 +436,7 @@ class KubernetesBackend(Backend):
                 "host": host,
                 "port": 8000,
             }
-            self._activity[key] = __import__("time").monotonic()
+            self._activity[key] = time.monotonic()
             recovered += 1
 
         if recovered:

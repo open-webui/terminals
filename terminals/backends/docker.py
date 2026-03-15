@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import secrets
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,7 @@ import httpx
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.parsing import parse_cpu_nanos, parse_memory
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +62,9 @@ class DockerBackend(Backend):
 
         # Resources
         if s.get("memory_limit"):
-            host_config["Memory"] = self._parse_memory(s["memory_limit"])
+            host_config["Memory"] = parse_memory(s["memory_limit"])
         if s.get("cpu_limit"):
-            host_config["NanoCpus"] = self._parse_cpu_nanos(s["cpu_limit"])
+            host_config["NanoCpus"] = parse_cpu_nanos(s["cpu_limit"])
 
         # Egress filtering is handled inside the container (dnsmasq + ipset +
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
@@ -222,7 +224,7 @@ class DockerBackend(Backend):
 
             instance_info = await self._extract_instance_info(container, name, api_key)
             self._instances[key] = instance_info
-            self._activity[key] = __import__("time").monotonic()
+            self._activity[key] = time.monotonic()
             recovered += 1
             log.info("Reconciled container %s → %s:%s", name, instance_info["host"], instance_info["port"])
 
@@ -230,31 +232,8 @@ class DockerBackend(Backend):
             log.info("Reconciled %d running container(s)", recovered)
 
     # ------------------------------------------------------------------
-    # Resource parsing helpers
+    # Container lifecycle
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_memory(value: str) -> int:
-        """Parse K8s memory string to bytes. '512Mi' -> 536870912."""
-        import re
-        m = re.match(r"^(\d+(?:\.\d+)?)\s*(Ki|Mi|Gi|Ti)?$", str(value).strip())
-        if not m:
-            return int(value)
-        num, suffix = float(m.group(1)), m.group(2) or ""
-        mult = {"": 1, "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-        return int(num * mult[suffix])
-
-    @staticmethod
-    def _parse_cpu_nanos(value: str) -> int:
-        """Parse K8s CPU string to nanocpus. '2' -> 2_000_000_000, '500m' -> 500_000_000."""
-        import re
-        m = re.match(r"^(\d+(?:\.\d+)?)\s*(m)?$", str(value).strip())
-        if not m:
-            return int(float(value) * 1_000_000_000)
-        num, suffix = float(m.group(1)), m.group(2) or ""
-        if suffix == "m":
-            return int(num * 1_000_000)
-        return int(num * 1_000_000_000)
 
     async def start(self, instance_id: str) -> bool:
         current = await self.status(instance_id)
