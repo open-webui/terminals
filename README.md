@@ -7,9 +7,6 @@ Per-user [Open Terminal](https://github.com/open-webui/open-terminal) orchestrat
 
 Giving terminal access to users on Open WebUI requires per-user isolation: separate containers, each with their own credentials and resource constraints. Terminals handles the full lifecycle: provisioning containers on demand, proxying traffic per user, enforcing resource and network policies, validating Open WebUI JWTs natively, and cleaning up idle instances.
 
-> [!IMPORTANT]
-> **Production use requires an [Open WebUI Enterprise License](LICENSE) that includes Terminals.** Contact the Open WebUI team to verify your plan covers it.
-
 | Capability | |
 |---|---|
 | **Backends** | Docker, Kubernetes, K8s Operator |
@@ -21,6 +18,10 @@ Giving terminal access to users on Open WebUI requires per-user isolation: separ
 | **Network control** | Egress filtering via `env.OPEN_TERMINAL_ALLOWED_DOMAINS` |
 | **Idle cleanup** | Automatic teardown of inactive instances |
 | **Runtime changes** | Update policies via API without redeployment |
+
+> [!IMPORTANT]
+> **Production use requires an [Open WebUI Enterprise License](LICENSE) that includes Terminals.** Contact the Open WebUI team to verify your plan covers it.
+
 
 ## Quick Start
 
