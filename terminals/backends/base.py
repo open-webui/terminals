@@ -65,6 +65,32 @@ class Backend(ABC):
     async def close(self) -> None:
         """Release resources on shutdown."""
 
+    async def list_instances(self) -> list[dict]:
+        """Return all tracked terminal instances with status info.
+
+        Each dict contains at least: ``user_id``, ``policy_id``,
+        ``instance_id``, ``status``, ``instance_name``.
+
+        Backends may override for richer information (e.g. querying CRDs).
+        The default implementation returns in-memory tracked instances.
+        """
+        results = []
+        for key, info in list(self._instances.items()):
+            parts = key.split(":", 1)
+            user_id = parts[0]
+            policy_id = parts[1] if len(parts) > 1 else "default"
+            st = await self.status(info["instance_id"])
+            results.append({
+                "user_id": user_id,
+                "policy_id": policy_id,
+                "instance_id": info["instance_id"],
+                "instance_name": info.get("instance_name", ""),
+                "status": st,
+                "host": info.get("host", ""),
+                "port": info.get("port", 0),
+            })
+        return results
+
     # ------------------------------------------------------------------
     # Instance tracking
     # ------------------------------------------------------------------

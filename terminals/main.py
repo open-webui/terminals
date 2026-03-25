@@ -62,9 +62,11 @@ async def health():
 
 
 from terminals.routers.policy import router as policy_router
+from terminals.routers.instances import router as instances_router
 
 # Policy CRUD must be before the catch-all proxy.
 app.include_router(policy_router)
+app.include_router(instances_router)
 
 # Catch-all proxy router must be last so /health and /api are matched first.
 app.include_router(proxy_router)

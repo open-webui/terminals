@@ -611,3 +611,52 @@ class KubernetesOperatorBackend(Backend):
         except client.exceptions.ApiException as e:
             if e.status != 404:
                 log.warning("Failed to touch activity for %s: %s", name, e)
+
+    async def list_instances(self) -> list[dict]:
+        """List all Terminal CRs managed by the operator.
+
+        Queries Kubernetes directly for authoritative status rather than
+        relying on in-memory tracking.
+        """
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        ns = settings.kubernetes_namespace
+
+        try:
+            result = await custom.list_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                label_selector="app.kubernetes.io/managed-by=terminals",
+            )
+        except client.exceptions.ApiException:
+            log.exception("Failed to list Terminal CRs")
+            return []
+
+        instances = []
+        for item in result.get("items", []):
+            metadata = item.get("metadata", {})
+            spec = item.get("spec", {})
+            status = item.get("status", {})
+            labels = metadata.get("labels", {})
+
+            instances.append({
+                "user_id": spec.get("userId", labels.get("openwebui.com/user-id", "")),
+                "policy_id": labels.get("openwebui.com/policy", "default"),
+                "instance_id": metadata.get("uid", ""),
+                "instance_name": metadata.get("name", ""),
+                "status": (status.get("phase") or "Unknown").lower(),
+                "host": status.get("serviceName", ""),
+                "port": 8000,
+                "image": spec.get("image", ""),
+                "cpu_limit": spec.get("cpuLimit", ""),
+                "memory_limit": spec.get("memoryLimit", ""),
+                "storage": spec.get("storage", ""),
+                "idle_timeout_minutes": spec.get("idleTimeoutMinutes", 0),
+                "last_activity": status.get("lastActivityAt", ""),
+                "created_at": metadata.get("creationTimestamp", ""),
+                "message": status.get("message", ""),
+            })
+
+        return instances
