@@ -16,6 +16,10 @@ dependencies = [
     "websockets>=13.0",
     "loguru>=0.7.3",
     "kubernetes-asyncio>=31.0.0",
+    "aiodocker>=0.23.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "alembic>=1.13.0",
 ]
 
 [project.scripts]
