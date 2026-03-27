@@ -1,6 +1,13 @@
 """Application settings loaded from environment variables."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Root data directory lives next to the *package* directory so that the
+# location is the same regardless of the caller's working directory.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_DEFAULT_DATA_DIR = str(_PACKAGE_DIR.parent / "data")
 
 
 class Settings(BaseSettings):
@@ -10,7 +17,7 @@ class Settings(BaseSettings):
     open_webui_url: str = ""  # if set, validate JWTs against this Open WebUI instance
 
     # Database
-    database_url: str = "sqlite+aiosqlite:///./data/terminals.db"
+    database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DATA_DIR}/terminals.db"
 
     # Backend selection: "docker", "kubernetes", or "kubernetes-operator"
     backend: str = "docker"
@@ -19,7 +26,7 @@ class Settings(BaseSettings):
     image: str = "ghcr.io/open-webui/open-terminal:latest"
     network: str = ""
     docker_host: str = "127.0.0.1"  # address to reach published container ports
-    data_dir: str = "./data/terminals"
+    data_dir: str = f"{_DEFAULT_DATA_DIR}/terminals"
 
     port: int = 3000
     host: str = "0.0.0.0"

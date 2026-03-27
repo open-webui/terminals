@@ -81,10 +81,13 @@ def _alembic_cfg():
         cfg = Config(str(ini_path))
     else:
         cfg = Config()
-        cfg.set_main_option(
-            "script_location",
-            str(Path(__file__).resolve().parent / "migrations"),
-        )
+
+    # Always resolve script_location to an absolute path so the CLI works
+    # regardless of the current working directory.
+    cfg.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parent / "migrations"),
+    )
 
     from terminals.config import settings
 
