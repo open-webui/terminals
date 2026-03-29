@@ -23,7 +23,7 @@ config = context.config
 
 # Set up Python logging from the INI file.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Target metadata for autogenerate support.
 target_metadata = Base.metadata

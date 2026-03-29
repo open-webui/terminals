@@ -46,4 +46,6 @@ def setup_logging() -> None:
     # Intercept stdlib logging (uvicorn, sqlalchemy, etc.).
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy"):
-        logging.getLogger(name).handlers = [_InterceptHandler()]
+        named = logging.getLogger(name)
+        named.handlers = [_InterceptHandler()]
+        named.propagate = False

@@ -17,10 +17,11 @@ from terminals.routers.proxy import close_proxy_client, router as proxy_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
-    setup_logging()
-
-    # Run DB migrations
+    # Run DB migrations first (alembic's fileConfig reconfigures logging).
     init_db()
+
+    # Set up loguru AFTER alembic so our InterceptHandler isn't overwritten.
+    setup_logging()
 
     app.state.backend = create_backend()
 
