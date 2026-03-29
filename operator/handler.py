@@ -78,13 +78,17 @@ def _owner_ref(body: dict) -> dict:
     }
 
 
-def _labels(name: str) -> dict[str, str]:
-    return {
+def _labels(name: str, user_id: str = "") -> dict[str, str]:
+    labels = {
         "app.kubernetes.io/name": "open-terminal",
         "app.kubernetes.io/instance": name,
-        "app.kubernetes.io/managed-by": "open-terminal-operator",
+        "app.kubernetes.io/managed-by": "terminals",
+        "app.kubernetes.io/part-of": "open-terminal",
         "openwebui.com/terminal": name,
     }
+    if user_id:
+        labels["openwebui.com/user-id"] = user_id
+    return labels
 
 
 def _set_condition(
@@ -127,6 +131,7 @@ def _build_pod_manifest(
     api_key: str,
     owner_ref: dict,
     pvc_name: str | None,
+    user_id: str = "",
 ) -> dict:
     """Build the Pod manifest for an Open Terminal instance."""
     image = spec.get("image", "ghcr.io/open-webui/open-terminal:latest")
@@ -179,7 +184,7 @@ def _build_pod_manifest(
         if limits:
             container["resources"]["limits"] = limits
 
-    pod_labels = _labels(name)
+    pod_labels = _labels(name, user_id)
 
     return {
         "apiVersion": "v1",
@@ -201,7 +206,7 @@ def _build_pod_manifest(
 
 
 def _build_service_manifest(
-    name: str, namespace: str, owner_ref: dict
+    name: str, namespace: str, owner_ref: dict, user_id: str = ""
 ) -> dict:
     return {
         "apiVersion": "v1",
@@ -209,7 +214,7 @@ def _build_service_manifest(
         "metadata": {
             "name": _resource_name(name, "svc"),
             "namespace": namespace,
-            "labels": _labels(name),
+            "labels": _labels(name, user_id),
             "ownerReferences": [owner_ref],
         },
         "spec": {
@@ -223,7 +228,8 @@ def _build_service_manifest(
 
 
 def _build_secret_manifest(
-    name: str, namespace: str, api_key: str, owner_ref: dict
+    name: str, namespace: str, api_key: str, owner_ref: dict,
+    user_id: str = "",
 ) -> dict:
     return {
         "apiVersion": "v1",
@@ -231,7 +237,7 @@ def _build_secret_manifest(
         "metadata": {
             "name": _resource_name(name, "apikey"),
             "namespace": namespace,
-            "labels": _labels(name),
+            "labels": _labels(name, user_id),
             "ownerReferences": [owner_ref],
         },
         "type": "Opaque",
@@ -242,7 +248,8 @@ def _build_secret_manifest(
 
 
 def _build_pvc_manifest(
-    name: str, namespace: str, spec: dict, owner_ref: dict
+    name: str, namespace: str, spec: dict, owner_ref: dict,
+    user_id: str = "",
 ) -> dict:
     persistence = spec.get("persistence", {})
     size = persistence.get("size", "1Gi")
@@ -257,7 +264,7 @@ def _build_pvc_manifest(
         "metadata": {
             "name": _resource_name(name, "pvc"),
             "namespace": namespace,
-            "labels": _labels(name),
+            "labels": _labels(name, user_id),
         },
         "spec": {
             "accessModes": ["ReadWriteOnce"],
@@ -279,6 +286,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
     """Create all child resources for a new Terminal CR."""
     log.info("Creating terminal %s/%s for user %s", namespace, name, spec.get("userId"))
 
+    user_id = spec.get("userId", "")
     owner_ref = _owner_ref(body)
     api_key = _generate_api_key()
     core_v1 = k8s.CoreV1Api()
@@ -295,7 +303,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
     pvc_name = None
     if persistence.get("enabled", True):
         pvc_name = _resource_name(name, "pvc")
-        pvc_manifest = _build_pvc_manifest(name, namespace, spec, owner_ref)
+        pvc_manifest = _build_pvc_manifest(name, namespace, spec, owner_ref, user_id=user_id)
         try:
             core_v1.create_namespaced_persistent_volume_claim(
                 namespace=namespace, body=pvc_manifest
@@ -309,7 +317,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
 
     # -- Secret (API key)
     secret_name = _resource_name(name, "apikey")
-    secret_manifest = _build_secret_manifest(name, namespace, api_key, owner_ref)
+    secret_manifest = _build_secret_manifest(name, namespace, api_key, owner_ref, user_id=user_id)
     try:
         core_v1.create_namespaced_secret(namespace=namespace, body=secret_manifest)
         log.info("Created Secret %s/%s", namespace, secret_name)
@@ -323,7 +331,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
 
     # -- Service
     svc_name = _resource_name(name, "svc")
-    svc_manifest = _build_service_manifest(name, namespace, owner_ref)
+    svc_manifest = _build_service_manifest(name, namespace, owner_ref, user_id=user_id)
     try:
         core_v1.create_namespaced_service(namespace=namespace, body=svc_manifest)
         log.info("Created Service %s/%s", namespace, svc_name)
@@ -336,7 +344,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
     # -- Pod
     pod_name = _resource_name(name, "pod")
     pod_manifest = _build_pod_manifest(
-        name, namespace, spec, api_key, owner_ref, pvc_name
+        name, namespace, spec, api_key, owner_ref, pvc_name, user_id=user_id
     )
     try:
         core_v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
@@ -383,7 +391,7 @@ async def on_delete(name, namespace, **_):
 # ---------------------------------------------------------------------------
 
 
-@kopf.on.event("v1", "pods", labels={"app.kubernetes.io/managed-by": "open-terminal-operator"})
+@kopf.on.event("v1", "pods", labels={"app.kubernetes.io/managed-by": "terminals"})
 async def on_pod_event(event, body, **_):
     """Watch terminal pods and reflect readiness back into the Terminal CR status."""
     pod = body
