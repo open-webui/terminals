@@ -12,8 +12,24 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Extract version from pyproject.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
   build-orchestrator:
     runs-on: ${{ matrix.runner }}
+    needs: [get-version]
     permissions:
       contents: read
       packages: write
@@ -63,6 +79,7 @@ jobs:
             type=sha,prefix=git-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.get-version.outputs.version }}
           flavor: |
             latest=${{ github.ref == 'refs/heads/main' }}
 
@@ -109,6 +126,7 @@ jobs:
 
   build-operator:
     runs-on: ${{ matrix.runner }}
+    needs: [get-version]
     permissions:
       contents: read
       packages: write
@@ -158,6 +176,7 @@ jobs:
             type=sha,prefix=git-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.get-version.outputs.version }}
           flavor: |
             latest=${{ github.ref == 'refs/heads/main' }}
 
@@ -204,7 +223,7 @@ jobs:
 
   merge-orchestrator-images:
     runs-on: ubuntu-latest
-    needs: [build-orchestrator]
+    needs: [get-version, build-orchestrator]
     permissions:
       contents: read
       packages: write
@@ -241,6 +260,7 @@ jobs:
             type=sha,prefix=git-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.get-version.outputs.version }}
           flavor: |
             latest=${{ github.ref == 'refs/heads/main' }}
 
@@ -252,11 +272,11 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:${{ needs.get-version.outputs.version }}
 
   merge-operator-images:
     runs-on: ubuntu-latest
-    needs: [build-operator]
+    needs: [get-version, build-operator]
     permissions:
       contents: read
       packages: write
@@ -293,6 +313,7 @@ jobs:
             type=sha,prefix=git-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.get-version.outputs.version }}
           flavor: |
             latest=${{ github.ref == 'refs/heads/main' }}
 
@@ -304,4 +325,33 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:${{ needs.get-version.outputs.version }}
+
+  create-release:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [get-version, merge-orchestrator-images, merge-operator-images]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Extract changelog for version
+        id: changelog
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          # Extract the section for this version from CHANGELOG.md
+          NOTES=$(awk "/^## \\[$VERSION\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md)
+          # Write to file to preserve newlines
+          echo "$NOTES" > /tmp/release-notes.md
+          echo "Extracted release notes for v$VERSION"
+          cat /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.get-version.outputs.version }}
+          name: v${{ needs.get-version.outputs.version }}
+          body_path: /tmp/release-notes.md
+          make_latest: true
