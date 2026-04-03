@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import logging
 import re
 import secrets
@@ -23,10 +24,13 @@ log = logging.getLogger(__name__)
 _DNS_SAFE = re.compile(r"[^a-z0-9-]")
 
 
-def _sanitize_name(user_id: str) -> str:
-    """Convert a user ID to a DNS-safe K8s resource name."""
-    name = _DNS_SAFE.sub("-", user_id.lower()).strip("-")[:53]
-    return f"terminal-{name}"
+def _sanitize_name(user_id: str, policy_id: str = "default") -> str:
+    """Deterministic, DNS-safe K8s resource name (≤63 chars)."""
+    short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+    if policy_id == "default":
+        return f"terminal-{short}"
+    policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+    return f"terminal-{short}-{policy_slug}"
 
 
 def _parse_labels() -> dict[str, str]:
@@ -87,9 +91,8 @@ class KubernetesBackend(Backend):
         s = spec or {}
 
         api_key = secrets.token_urlsafe(24)
-        base_name = _sanitize_name(user_id)
+        name = _sanitize_name(user_id, policy_id)
         policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-        name = f"{base_name}-{policy_slug}" if policy_id != "default" else base_name
         ns = settings.kubernetes_namespace
         labels = _base_labels(user_id)
         labels["openwebui.com/policy"] = policy_slug

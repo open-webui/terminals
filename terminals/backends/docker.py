@@ -1,7 +1,9 @@
 """Docker backend — provisions Open Terminal inside containers via aiodocker."""
 
 import asyncio
+import hashlib
 import logging
+import re
 import secrets
 import time
 from pathlib import Path
@@ -18,6 +20,7 @@ log = logging.getLogger(__name__)
 
 # Container name prefix used for discovery during reconciliation.
 _CONTAINER_PREFIX = "terminals-"
+_DNS_SAFE = re.compile(r"[^a-z0-9-]")
 
 
 class DockerBackend(Backend):
@@ -34,8 +37,12 @@ class DockerBackend(Backend):
 
     @staticmethod
     def _container_name(policy_id: str, user_id: str) -> str:
-        """Build the deterministic container name."""
-        return f"{_CONTAINER_PREFIX}{policy_id}-{user_id}"
+        """Build a deterministic, DNS-safe container name (≤63 chars)."""
+        short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+        if policy_id == "default":
+            return f"{_CONTAINER_PREFIX}{short}"
+        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        return f"{_CONTAINER_PREFIX}{short}-{policy_slug}"
 
     # ------------------------------------------------------------------
     # Backend interface

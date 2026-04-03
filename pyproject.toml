@@ -1,6 +1,6 @@
 [project]
 name = "terminals"
-version = "0.0.1"
+version = "0.0.2"
 description = "Multi-tenant terminal orchestrator for Open Terminal."
 readme = "README.md"
 authors = [
