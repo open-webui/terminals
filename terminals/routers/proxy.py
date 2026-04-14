@@ -10,6 +10,7 @@ Named policy endpoints:
 """
 
 import asyncio
+import hmac
 import json
 import time
 from dataclasses import dataclass
@@ -398,12 +399,34 @@ async def proxy(
 
 
 async def _validate_ws_auth(
-    ws: WebSocket, token: str, user_id: str
+    ws: WebSocket, user_id: str
 ) -> Optional[str]:
-    """Validate WS auth, return verified user_id or close the socket.
+    """Accept WebSocket and validate via first-message auth.
 
-    Returns the effective user_id on success, or ``None`` if closed.
+    After connecting, the client must send a JSON text frame::
+
+        {"type": "auth", "token": "<api_key_or_jwt>"}
+
+    Returns the effective user_id on success, or ``None`` after closing
+    the socket with an appropriate error code.
     """
+    await ws.accept()
+
+    # First-message authentication
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        payload = json.loads(raw)
+        if payload.get("type") != "auth":
+            await ws.close(code=4001, reason="Expected auth message")
+            return None
+        token = payload.get("token", "")
+    except (asyncio.TimeoutError, json.JSONDecodeError):
+        await ws.close(code=4001, reason="Auth timeout or invalid payload")
+        return None
+    except Exception:
+        await ws.close(code=4001, reason="Auth failed")
+        return None
+
     verified_user_id = None
     if settings.open_webui_url:
         try:
@@ -411,7 +434,7 @@ async def _validate_ws_auth(
         except Exception:
             await ws.close(code=4001, reason="Invalid token")
             return None
-    elif settings.api_key and token != settings.api_key:
+    elif settings.api_key and not hmac.compare_digest(token, settings.api_key):
         await ws.close(code=4001, reason="Invalid API key")
         return None
 
@@ -434,8 +457,6 @@ async def _ws_proxy_handler(
     spec: Optional[dict] = None,
 ):
     """Core WebSocket proxy logic, shared by default and policy routes."""
-    await ws.accept()
-
     global active_ws_connections
     active_ws_connections += 1
 
@@ -512,11 +533,10 @@ async def _ws_proxy_handler(
 async def ws_terminal_proxy(
     ws: WebSocket,
     session_id: str,
-    token: str = Query(""),
     user_id: str = Query(""),
 ):
     """Default WebSocket terminal proxy (no policy)."""
-    effective_user = await _validate_ws_auth(ws, token, user_id)
+    effective_user = await _validate_ws_auth(ws, user_id)
     if effective_user is None:
         return
     await _ws_proxy_handler(ws, session_id, effective_user)
@@ -527,11 +547,10 @@ async def ws_policy_terminal_proxy(
     ws: WebSocket,
     policy_id: str,
     session_id: str,
-    token: str = Query(""),
     user_id: str = Query(""),
 ):
     """Policy-scoped WebSocket terminal proxy."""
-    effective_user = await _validate_ws_auth(ws, token, user_id)
+    effective_user = await _validate_ws_auth(ws, user_id)
     if effective_user is None:
         return
 
