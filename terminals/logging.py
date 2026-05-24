@@ -64,9 +64,8 @@ def setup_logging() -> None:
         colorize=True,
     )
 
-    # Intercept stdlib logging (uvicorn, sqlalchemy, etc.). We forward at
-    # level=0 so loguru — not the stdlib handler — decides what is emitted,
-    # keeping the configured TERMINALS_LOG_LEVEL the single source of truth.
+    # Intercept stdlib logging (uvicorn, sqlalchemy, etc.); forward at
+    # level=0 so the loguru sink above owns the level decision.
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy"):
         named = logging.getLogger(name)
