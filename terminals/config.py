@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     port: int = 3000
     host: str = "0.0.0.0"
 
+    # Logging — one of TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
+    log_level: str = "INFO"
+
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"
     kubernetes_image: str = "ghcr.io/open-webui/open-terminal:latest"

@@ -16,6 +16,7 @@ Ported from the ``kubernetes-controller`` branch with the ABC-compatible
 
 import base64
 import logging
+import os
 import secrets
 import string
 from datetime import datetime, timezone
@@ -25,6 +26,25 @@ import kubernetes
 from kubernetes import client as k8s
 
 log = logging.getLogger(__name__)
+
+_VALID_LEVELS = {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
+
+
+def _resolve_log_level() -> int:
+    """Read TERMINALS_LOG_LEVEL and translate it to a stdlib logging level."""
+    raw = os.environ.get("TERMINALS_LOG_LEVEL", "INFO").upper()
+    if raw not in _VALID_LEVELS:
+        raw = "INFO"
+    # Loguru's SUCCESS/TRACE have no stdlib equivalents — map to nearest.
+    return {
+        "TRACE": logging.DEBUG,
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "SUCCESS": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }[raw]
 
 GROUP = "openwebui.com"
 VERSION = "v1alpha1"
@@ -43,7 +63,10 @@ def configure(settings: kopf.OperatorSettings, **_):
         kubernetes.config.load_incluster_config()
     except kubernetes.config.ConfigException:
         kubernetes.config.load_kube_config()
-    settings.posting.level = logging.WARNING
+
+    level = _resolve_log_level()
+    logging.getLogger().setLevel(level)
+    settings.posting.level = max(level, logging.WARNING)
     settings.persistence.finalizer = "terminals.openwebui.com/finalizer"
 
 
