@@ -1,0 +1,50 @@
+# RBAC for the Terminals service to drive Agent Sandbox CRDs.
+#
+# Apply AFTER installing the agent-sandbox controller + extensions:
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<VER>/manifest.yaml
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<VER>/extensions.yaml
+#   kubectl apply -f manifests/sandbox-rbac.yaml
+#
+# The Terminals Deployment must set `serviceAccountName: terminals` and
+# `TERMINALS_BACKEND=kubernetes-sandbox`.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: terminals
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terminals
+  namespace: terminals
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: terminals-sandbox
+  namespace: terminals
+rules:
+  # Core Sandbox resource: create/delete per user, patch replicas for
+  # suspend/resume, and read status (serviceFQDN, Ready condition).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes", "sandboxes/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read-only access to the Services/Pods the controller creates.
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: terminals-sandbox
+  namespace: terminals
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: terminals-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: terminals
+    namespace: terminals

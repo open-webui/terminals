@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DATA_DIR}/terminals.db"
 
-    # Backend selection: "docker", "kubernetes", or "kubernetes-operator"
+    # Backend selection: "docker", "kubernetes", or "kubernetes-sandbox"
     backend: str = "docker"
 
     # Docker settings
@@ -41,9 +41,13 @@ class Settings(BaseSettings):
     kubernetes_kubeconfig: str = ""           # empty = in-cluster config
     kubernetes_labels: str = ""               # extra labels as "k=v,k2=v2"
 
-    # Operator-specific settings
-    kubernetes_crd_group: str = "openwebui.com"
-    kubernetes_crd_version: str = "v1alpha1"
+    # Agent Sandbox settings (TERMINALS_BACKEND=kubernetes-sandbox)
+    # Upstream project: https://github.com/kubernetes-sigs/agent-sandbox
+    sandbox_core_group: str = "agents.x-k8s.io"            # Sandbox CRD group
+    sandbox_ext_group: str = "extensions.agents.x-k8s.io"  # Template/WarmPool/Claim group
+    sandbox_version: str = "v1beta1"
+    sandbox_port: int = 8000                # open-terminal container port
+    sandbox_runtime_class: str = ""         # e.g. "gvisor" or "kata-qemu" for isolation
 
     # Idle reaper — tear down terminals after N minutes of inactivity (0 = disabled)
     idle_timeout_minutes: int = 0

@@ -30,17 +30,51 @@ docker run -p 3000:3000 \
 
 **Prerequisites:** Docker running on the host.
 
-### Kubernetes Operator (recommended for clusters)
+### Kubernetes with Agent Sandbox (recommended for clusters)
 
-For Kubernetes deployments, the operator manages `Terminal` custom resources automatically — handling pod creation, storage, and cleanup through CRDs.
+For Kubernetes deployments, Terminals builds on the upstream
+[Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) project (SIG Apps).
+Each user+policy maps to a single `Sandbox` custom resource; the agent-sandbox
+controller reconciles it into a Pod, a headless Service (a stable `serviceFQDN`),
+and a PersistentVolume when a workspace is requested. Idle terminals are
+**suspended** (`operatingMode: Suspended`, scale-to-zero with storage and identity
+preserved) and resumed on the next request.
+
+Workspace persistence: the per-user `PersistentVolumeClaim` is created from the
+Sandbox's `volumeClaimTemplates` and owned by the Sandbox. Suspending keeps the
+Sandbox object, so `/workspace` data survives idle and resume. **Tearing a terminal
+down deletes the Sandbox and its PVC** (workspace data is removed) — idle reaping uses
+suspend, not teardown, so normal inactivity never destroys data.
 
 ```bash
-# Install the CRD and operator
-kubectl apply -f manifests/terminal-crd.yaml
-kubectl apply -f manifests/operator-deployment.yaml
+# 1. Install the agent-sandbox controller + extensions (pin a release version)
+export VERSION="v0.5.0rc1"  # see https://github.com/kubernetes-sigs/agent-sandbox/releases
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+
+# 2. Grant the Terminals service access to the Sandbox CRDs
+kubectl apply -f manifests/sandbox-rbac.yaml
 ```
 
-Set `TERMINALS_BACKEND=kubernetes-operator` when deploying the Terminals service.
+Set `TERMINALS_BACKEND=kubernetes-sandbox` when deploying the Terminals service
+(with `serviceAccountName: terminals`). For stronger isolation of user code, set
+`TERMINALS_SANDBOX_RUNTIME_CLASS=gvisor` (or `kata-qemu`) once the runtime is
+installed on your nodes.
+
+> [!NOTE]
+> Agent Sandbox is a young upstream project — this backend targets `v1beta1` (v0.5.x);
+> pin a release version and track changes. Two trade-offs to be aware of: the per-user
+> API key lives as a plaintext env value in the `Sandbox` pod template (rely on RBAC +
+> etcd encryption-at-rest), and **idle tracking is in-memory** in the Terminals process
+> (run a single Terminals replica, or expect idle to be tracked per-replica). Warm pools
+> are intentionally not used — they are mutually exclusive with per-user API keys (an
+> env-injecting claim bypasses the pool), so first connection pays pod start-up (the
+> image is cached on the node after the first pull).
+>
+> These last two are things the backend self-manages **because the controller does not
+> yet**. Both are on the [upstream roadmap](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/roadmap.md)
+> (*Auto Suspend/Resume*, *Scale to Zero*, *Sandbox/Pod Identity Association*); the
+> backend is pinned to `v1beta1` specifically so we can drop these shims as they land.
 
 ### From source (development)
 
@@ -54,7 +88,7 @@ terminals serve
 | Backend | Best for | How it works |
 |---------|----------|-------------|
 | `docker` | Single-node, local dev | One container per user via Docker socket |
-| `kubernetes-operator` | Production K8s clusters | Operator watches `Terminal` CRDs for automated lifecycle |
+| `kubernetes-sandbox` | Production K8s clusters | One [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` per user; suspend/resume on idle |
 | `kubernetes` | K8s without CRDs | Direct Pod + PVC + Service per user (you manage resources) |
 
 Set the backend with `TERMINALS_BACKEND` (defaults to `docker`).
@@ -109,7 +143,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-operator` |
+| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-sandbox` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per container |
@@ -117,6 +151,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_MAX_STORAGE` | | Hard cap on storage per container |
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | `per-user`, `shared`, or `shared-rwo` |
+| `TERMINALS_SANDBOX_RUNTIME_CLASS` | | RuntimeClass for sandbox isolation, e.g. `gvisor` or `kata-qemu` |
 
 See [`config.py`](terminals/config.py) for the full list.
 
