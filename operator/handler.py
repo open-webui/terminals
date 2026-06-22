@@ -16,6 +16,7 @@ Ported from the ``kubernetes-controller`` branch with the ABC-compatible
 
 import base64
 import logging
+import os
 import secrets
 import string
 from datetime import datetime, timezone
@@ -25,6 +26,14 @@ import kubernetes
 from kubernetes import client as k8s
 
 log = logging.getLogger(__name__)
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
 
 GROUP = "openwebui.com"
 VERSION = "v1alpha1"
@@ -36,6 +45,20 @@ PLURAL = "terminals"
 # ---------------------------------------------------------------------------
 
 
+def _configured_log_level() -> int:
+    raw = os.environ.get("TERMINALS_LOG_LEVEL", "INFO")
+    level = raw.strip().upper()
+    if level in _LOG_LEVELS:
+        return _LOG_LEVELS[level]
+
+    log.warning(
+        "Invalid TERMINALS_LOG_LEVEL=%r; using INFO. Expected one of: %s",
+        raw,
+        ", ".join(_LOG_LEVELS),
+    )
+    return logging.INFO
+
+
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     """Load K8s config and configure kopf settings."""
@@ -43,7 +66,9 @@ def configure(settings: kopf.OperatorSettings, **_):
         kubernetes.config.load_incluster_config()
     except kubernetes.config.ConfigException:
         kubernetes.config.load_kube_config()
-    settings.posting.level = logging.WARNING
+    log_level = _configured_log_level()
+    logging.getLogger().setLevel(log_level)
+    settings.posting.level = max(log_level, logging.WARNING)
     settings.persistence.finalizer = "terminals.openwebui.com/finalizer"
 
 

@@ -5,6 +5,17 @@ import sys
 
 from loguru import logger
 
+from terminals.config import settings
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+LOG_LEVEL_NAMES = tuple(_LOG_LEVELS)
+
 
 class _InterceptHandler(logging.Handler):
     """Route stdlib logging messages into loguru."""
@@ -26,8 +37,15 @@ class _InterceptHandler(logging.Handler):
         )
 
 
+def normalize_log_level(value: str | None, default: str = "INFO") -> str:
+    """Return a supported logging level name."""
+    level = (value or default).strip().upper()
+    return level if level in _LOG_LEVELS else default
+
+
 def setup_logging() -> None:
     """Call once at startup to configure loguru and intercept stdlib logging."""
+    level = normalize_log_level(settings.log_level)
 
     # Remove default loguru handler and add our own.
     logger.remove()
@@ -39,13 +57,20 @@ def setup_logging() -> None:
             "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
             "<level>{message}</level>"
         ),
-        level="DEBUG",
+        level=level,
         colorize=True,
     )
+    if level != (settings.log_level or "").strip().upper():
+        logger.warning(
+            "Invalid TERMINALS_LOG_LEVEL={!r}; using INFO. Expected one of: {}",
+            settings.log_level,
+            ", ".join(LOG_LEVEL_NAMES),
+        )
 
     # Intercept stdlib logging (uvicorn, sqlalchemy, etc.).
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy"):
         named = logging.getLogger(name)
         named.handlers = [_InterceptHandler()]
+        named.setLevel(0)
         named.propagate = False

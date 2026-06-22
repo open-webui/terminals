@@ -120,6 +120,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_MAX_STORAGE` | | Hard cap on storage per container |
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | `per-user`, `shared`, or `shared-rwo` |
+| `TERMINALS_LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 
 See [`config.py`](terminals/config.py) for the full list.
 

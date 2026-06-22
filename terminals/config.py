@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     port: int = 3000
     host: str = "0.0.0.0"
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"

@@ -34,6 +34,7 @@ def serve(host: str | None, port: int | None, api_key: str | None):
     import secrets
 
     from terminals.config import settings
+    from terminals.logging import normalize_log_level
 
     # CLI flags take precedence over env/config.
     effective_host = host or settings.host
@@ -56,7 +57,12 @@ def serve(host: str | None, port: int | None, api_key: str | None):
         click.echo("=" * 60)
     click.echo()
 
-    uvicorn.run("terminals.main:app", host=effective_host, port=effective_port)
+    uvicorn.run(
+        "terminals.main:app",
+        host=effective_host,
+        port=effective_port,
+        log_level=normalize_log_level(settings.log_level).lower(),
+    )
 
 
 # ---------------------------------------------------------------------------
