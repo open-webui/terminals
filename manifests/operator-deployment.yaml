@@ -19,9 +19,9 @@ rules:
   - apiGroups: ["openwebui.com"]
     resources: ["terminals", "terminals/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Pods, Services, PVCs managed by the operator
+  # Pods, Services, PVCs, and API-key Secrets managed by the operator
   - apiGroups: [""]
-    resources: ["pods", "services", "persistentvolumeclaims"]
+    resources: ["pods", "services", "persistentvolumeclaims", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Events (Kopf posts events for status)
   - apiGroups: [""]
@@ -67,9 +67,18 @@ spec:
         app.kubernetes.io/name: open-terminal-operator
     spec:
       serviceAccountName: open-terminal-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: operator
           image: ghcr.io/open-webui/open-terminal-operator:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               memory: "64Mi"

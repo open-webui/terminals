@@ -15,6 +15,11 @@ from kubernetes_asyncio.client import ApiClient
 from terminals.backends.base import Backend
 from terminals.config import settings
 from terminals.utils.env import build_terminal_env
+from terminals.utils.kubernetes_security import (
+    container_security_context,
+    pod_security_context,
+    restricted_enabled,
+)
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +147,15 @@ class KubernetesBackend(Backend):
         # Egress filtering is handled inside the container (dnsmasq + ipset +
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
         has_egress_policy = "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env
+        restricted = restricted_enabled(s)
+        pod_security = pod_security_context(s)
+        container_security = container_security_context(s)
+        if not container_security and has_egress_policy and not restricted:
+            container_security = {
+                "capabilities": {
+                    "add": ["NET_ADMIN"],
+                },
+            }
 
         # ---- Resource requirements ---------------------------------------
         resource_reqs = None
@@ -244,11 +258,7 @@ class KubernetesBackend(Backend):
                         env=env_vars,
                         volume_mounts=volume_mounts or None,
                         resources=resource_reqs,
-                        security_context=client.V1SecurityContext(
-                            capabilities=client.V1Capabilities(
-                                add=["NET_ADMIN"],
-                            ),
-                        ) if has_egress_policy else None,
+                        security_context=container_security or None,
                         readiness_probe=client.V1Probe(
                             http_get=client.V1HTTPGetAction(
                                 path="/health", port=8000
@@ -261,6 +271,7 @@ class KubernetesBackend(Backend):
                 volumes=volumes or None,
                 affinity=affinity,
                 restart_policy="Always",
+                security_context=pod_security or None,
             ),
         )
 
@@ -340,7 +351,7 @@ class KubernetesBackend(Backend):
         current = await self.status(instance_id)
         if current == "running":
             return True
-        # Pods can't be restarted — caller should re-provision.
+        # Pods cannot be restarted. The caller should refresh the terminal.
         return False
 
     async def teardown(self, instance_id: str) -> None:

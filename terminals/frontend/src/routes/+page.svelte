@@ -41,6 +41,9 @@
 	let loading = $state(false);
 	let editingPolicy = $state<EditingPolicy | null>(null);
 	const envPlaceholder = '{"OPEN_TERMINAL_ALLOWED_DOMAINS":"github.com"}';
+	const podSecurityPlaceholder = '{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}';
+	const containerSecurityPlaceholder =
+		'{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true}';
 
 	onMount(() => {
 		token = localStorage.getItem('terminals.adminToken') || '';
@@ -73,34 +76,34 @@
 		return (await res.json()) as T;
 	}
 
-		async function loadAll() {
-			loading = true;
-			error = '';
-			try {
-				const [nextStatus, nextTerminals, nextPolicies] = await Promise.all([
+	async function loadAll() {
+		loading = true;
+		error = '';
+		try {
+			const [nextStatus, nextTerminals, nextPolicies] = await Promise.all([
 				api<AdminStatus>('/api/v1/status'),
 				api<TerminalRow[]>('/api/v1/terminals'),
-					api<PolicyRow[]>('/api/v1/policies')
-				]);
-				const policiesWithLifecycle = await Promise.all(
-					nextPolicies.map(async (policy) => {
-						try {
-							const lifecycle = await api<{ data?: Record<string, any> }>(
-								`/api/v1/policies/${encodeURIComponent(policy.id)}/lifecycle`
-							);
-							return { ...policy, lifecycle: lifecycle.data || {} };
-						} catch {
-							return { ...policy, lifecycle: {} };
-						}
-					})
-				);
-				status = nextStatus;
-				terminals = nextTerminals;
-				policies = policiesWithLifecycle;
-			} catch (err) {
-				error = err instanceof Error ? err.message : 'Failed to load';
-			} finally {
-				loading = false;
+				api<PolicyRow[]>('/api/v1/policies')
+			]);
+			const policiesWithLifecycle = await Promise.all(
+				nextPolicies.map(async (policy) => {
+					try {
+						const lifecycle = await api<{ data?: Record<string, any> }>(
+							`/api/v1/policies/${encodeURIComponent(policy.id)}/lifecycle`
+						);
+						return { ...policy, lifecycle: lifecycle.data || {} };
+					} catch {
+						return { ...policy, lifecycle: {} };
+					}
+				})
+			);
+			status = nextStatus;
+			terminals = nextTerminals;
+			policies = policiesWithLifecycle;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load';
+		} finally {
+			loading = false;
 		}
 	}
 
@@ -118,13 +121,17 @@
 		return new Date(value).toLocaleDateString();
 	}
 
-		function policyValue(policy: PolicyRow, key: string, fallback = '-') {
-			return policy.data?.[key] ?? fallback;
-		}
+	function policyValue(policy: PolicyRow, key: string, fallback = '-') {
+		return policy.data?.[key] ?? fallback;
+	}
 
-		function resetSchedule(policy: PolicyRow) {
-			return policy.lifecycle?.reset?.schedule ?? '-';
-		}
+	function resetSchedule(policy: PolicyRow) {
+		return policy.lifecycle?.reset?.schedule ?? '-';
+	}
+
+	function restrictedLabel(policy: PolicyRow) {
+		return policy.data?.restricted ? 'restricted' : 'standard';
+	}
 
 	function statusClass(value: string) {
 		if (value === 'running') return 'bg-emerald-600';
@@ -145,16 +152,16 @@
 		}
 	}
 
-		function openPolicy(policy: PolicyRow | null = null) {
-			editingPolicy = policy
-				? {
-						id: policy.id,
-						existing: true,
-						data: { ...(policy.data || {}) },
-						lifecycle: { ...(policy.lifecycle || {}) }
-					}
-				: { id: '', existing: false, data: {}, lifecycle: {} };
-		}
+	function openPolicy(policy: PolicyRow | null = null) {
+		editingPolicy = policy
+			? {
+					id: policy.id,
+					existing: true,
+					data: { ...(policy.data || {}) },
+					lifecycle: { ...(policy.lifecycle || {}) }
+				}
+			: { id: '', existing: false, data: {}, lifecycle: {} };
+	}
 
 	async function deletePolicy(policy: PolicyRow) {
 		if (!confirm(`Delete policy "${policy.id}"?`)) return;
@@ -171,53 +178,54 @@
 		const data = new FormData(form);
 		const id = String(data.get('id') || '').trim();
 		const body: Record<string, any> = {};
-			for (const key of [
-				'image',
-				'cpu_limit',
-				'memory_limit',
-				'storage',
-				'storage_mode'
-			]) {
-				const value = String(data.get(key) || '').trim();
-				if (value) body[key] = value;
+		for (const key of ['image', 'cpu_limit', 'memory_limit', 'storage', 'storage_mode']) {
+			const value = String(data.get(key) || '').trim();
+			if (value) body[key] = value;
 		}
 		const idle = Number(data.get('idle_timeout_minutes'));
 		if (Number.isFinite(idle) && idle > 0) body.idle_timeout_minutes = idle;
+		if (data.get('restricted') === 'on') body.restricted = true;
 		const env = String(data.get('env') || '').trim();
-			if (env) body.env = JSON.parse(env);
-			return { id, body };
+		if (env) body.env = JSON.parse(env);
+		const podSecurityContext = String(data.get('pod_security_context') || '').trim();
+		if (podSecurityContext) body.pod_security_context = JSON.parse(podSecurityContext);
+		const containerSecurityContext = String(data.get('container_security_context') || '').trim();
+		if (containerSecurityContext) {
+			body.container_security_context = JSON.parse(containerSecurityContext);
 		}
+		return { id, body };
+	}
 
-		function readLifecycleForm(form: HTMLFormElement) {
-			const data = new FormData(form);
-			const schedule = String(data.get('reset_schedule') || '').trim();
-			const timezone = String(data.get('reset_timezone') || '').trim();
-			if (!schedule && !timezone) return {};
-			return {
-				reset: {
-					...(schedule ? { schedule } : {}),
-					...(timezone ? { timezone } : {})
-				}
-			};
-		}
+	function readLifecycleForm(form: HTMLFormElement) {
+		const data = new FormData(form);
+		const schedule = String(data.get('reset_schedule') || '').trim();
+		const timezone = String(data.get('reset_timezone') || '').trim();
+		if (!schedule) return {};
+		return {
+			reset: {
+				schedule,
+				...(timezone ? { timezone } : {})
+			}
+		};
+	}
 
 	async function savePolicy(event: SubmitEvent) {
 		event.preventDefault();
 		error = '';
-			try {
-				const { id, body } = readPolicyForm(event.currentTarget as HTMLFormElement);
-				const lifecycle = readLifecycleForm(event.currentTarget as HTMLFormElement);
-				if (!id) throw new Error('Policy ID is required');
-				await api(`/api/v1/policies/${encodeURIComponent(id)}`, {
-					method: 'PUT',
-					body: JSON.stringify(body)
-				});
-				await api(`/api/v1/policies/${encodeURIComponent(id)}/lifecycle`, {
-					method: 'PUT',
-					body: JSON.stringify(lifecycle)
-				});
-				editingPolicy = null;
-				await loadAll();
+		try {
+			const { id, body } = readPolicyForm(event.currentTarget as HTMLFormElement);
+			const lifecycle = readLifecycleForm(event.currentTarget as HTMLFormElement);
+			if (!id) throw new Error('Policy ID is required');
+			await api(`/api/v1/policies/${encodeURIComponent(id)}`, {
+				method: 'PUT',
+				body: JSON.stringify(body)
+			});
+			await api(`/api/v1/policies/${encodeURIComponent(id)}/lifecycle`, {
+				method: 'PUT',
+				body: JSON.stringify(lifecycle)
+			});
+			editingPolicy = null;
+			await loadAll();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to save policy';
 		}
@@ -366,6 +374,7 @@
 									<th class="h-9 px-1 font-medium">CPU</th>
 									<th class="h-9 px-1 font-medium">Memory</th>
 									<th class="h-9 px-1 font-medium">Idle</th>
+									<th class="h-9 px-1 font-medium">Mode</th>
 									<th class="h-9 px-1 font-medium">Reset</th>
 									<th class="h-9 w-20 px-1"></th>
 								</tr>
@@ -378,7 +387,8 @@
 										<td class="h-11 truncate px-1">{policyValue(policy, 'cpu_limit')}</td>
 										<td class="h-11 truncate px-1">{policyValue(policy, 'memory_limit')}</td>
 										<td class="h-11 truncate px-1">{policyValue(policy, 'idle_timeout_minutes')}</td>
-											<td class="h-11 truncate px-1">{resetSchedule(policy)}</td>
+										<td class="h-11 truncate px-1">{restrictedLabel(policy)}</td>
+										<td class="h-11 truncate px-1">{resetSchedule(policy)}</td>
 										<td class="h-11 px-1 text-right">
 											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Edit" title="Edit" onclick={() => openPolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
@@ -413,6 +423,7 @@
 			</div>
 
 			<form onsubmit={savePolicy}>
+				<div class="mb-3 border-b border-gray-200 pb-2 text-xs font-medium text-gray-500 dark:border-white/10">Policy</div>
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 					<label class="block text-[11px] font-medium text-gray-500">ID<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
 					<label class="block text-[11px] font-medium text-gray-500">Image<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
@@ -426,9 +437,15 @@
 						<option value="shared-rwo">shared-rwo</option>
 					</select></label>
 					<label class="block text-[11px] font-medium text-gray-500">Idle timeout<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
-						<label class="block text-[11px] font-medium text-gray-500">Reset timezone<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
-						<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Scheduled reset<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
+					<label class="flex items-center gap-2 text-[11px] font-medium text-gray-500"><input class="h-4 w-4 rounded border-gray-300" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
 					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
+					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
+					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
+				</div>
+				<div class="mb-3 mt-5 border-b border-gray-200 pb-2 text-xs font-medium text-gray-500 dark:border-white/10">Lifecycle</div>
+				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+					<label class="block text-[11px] font-medium text-gray-500">Reset timezone<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
+					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Scheduled reset<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
 				</div>
 				<div class="mt-4 flex justify-end gap-3">
 					<button class="text-[13px] text-gray-400 transition hover:text-gray-900 dark:hover:text-white" type="button" onclick={() => (editingPolicy = null)}>Cancel</button>

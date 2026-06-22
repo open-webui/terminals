@@ -21,6 +21,11 @@ from kubernetes_asyncio.client import ApiClient
 from terminals.backends.base import Backend, RefreshResult
 from terminals.config import settings
 from terminals.utils.env import build_terminal_env
+from terminals.utils.kubernetes_security import (
+    container_security_context,
+    pod_security_context,
+    restricted_enabled,
+)
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +140,15 @@ class KubernetesOperatorBackend(Backend):
             "userId": user_id,
             "image": image,
         }
+        restricted = restricted_enabled(s)
+        if restricted:
+            cr_spec["restricted"] = True
+        pod_security = pod_security_context(s)
+        if pod_security:
+            cr_spec["podSecurityContext"] = pod_security
+        container_security = container_security_context(s)
+        if container_security:
+            cr_spec["containerSecurityContext"] = container_security
 
         # CPU / memory limits
         limits = {}
@@ -584,7 +598,7 @@ class KubernetesOperatorBackend(Backend):
         if phase in ("Pending", "Provisioning"):
             return True  # still coming up
 
-        # Idle or Error — delete and let the caller re-provision
+        # Idle or Error means the caller should refresh this CR.
         return False
 
     async def teardown(self, instance_id: str) -> None:
@@ -663,7 +677,7 @@ class KubernetesOperatorBackend(Backend):
         """
         key = self._key(user_id, policy_id)
 
-        # Fast path — check if CR is already Running (no lock needed).
+        # Fast path: check if CR is already Running without taking the lock.
         cr = await self._get_terminal_cr(user_id, policy_id)
         if cr:
             status = cr.get("status") or {}
@@ -697,7 +711,7 @@ class KubernetesOperatorBackend(Backend):
 
             if phase in ("Idle", "Error"):
                 log.info(
-                    "Terminal CR %s in phase %s — deleting and re-provisioning",
+                    "Terminal CR %s in phase %s, deleting before refresh",
                     cr["metadata"]["name"],
                     phase,
                 )

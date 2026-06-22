@@ -63,6 +63,19 @@ spec:
                   minimum: 1
                   description: >-
                     Minutes of inactivity before the terminal pod is stopped.
+                restricted:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Apply restricted Kubernetes/OpenShift-safe pod defaults.
+                podSecurityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Pod securityContext copied to the terminal pod.
+                containerSecurityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Container securityContext copied to the terminal container.
                 packages:
                   type: array
                   items:

@@ -1,7 +1,9 @@
 """Application settings loaded from environment variables."""
 
+from typing import Any
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Root data directory lives next to the *package* directory so that the
@@ -42,6 +44,9 @@ class Settings(BaseSettings):
     kubernetes_service_type: str = "ClusterIP"
     kubernetes_kubeconfig: str = ""           # empty = in-cluster config
     kubernetes_labels: str = ""               # extra labels as "k=v,k2=v2"
+    kubernetes_restricted: bool = False        # OpenShift/restricted pod mode
+    kubernetes_pod_security_context: dict[str, Any] = Field(default_factory=dict)
+    kubernetes_container_security_context: dict[str, Any] = Field(default_factory=dict)
 
     # Operator-specific settings
     kubernetes_crd_group: str = "openwebui.com"

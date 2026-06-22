@@ -14,6 +14,10 @@ from terminals.utils.policy_lifecycle import (
     upsert_lifecycle_data,
     validate_lifecycle_data,
 )
+from terminals.utils.kubernetes_security import (
+    restricted_enabled,
+    restricted_env_errors,
+)
 from terminals.utils.parsing import parse_size
 
 router = APIRouter(prefix="/api/v1", tags=["policies"])
@@ -25,16 +29,20 @@ router = APIRouter(prefix="/api/v1", tags=["policies"])
 
 
 class PolicyData(BaseModel):
-    """Policy data — all fields optional, merged with defaults."""
+    """Policy data. All fields are optional and merged with defaults."""
+
     model_config = ConfigDict(extra="allow")
 
     image: Optional[str] = None
     env: Optional[dict] = None
     cpu_limit: Optional[str] = None
     memory_limit: Optional[str] = None
-    storage: Optional[str] = None        # e.g. "5Gi" — absent = ephemeral
-    storage_mode: Optional[str] = None   # per-user, shared, shared-rwo
+    storage: Optional[str] = None
+    storage_mode: Optional[str] = None
     idle_timeout_minutes: Optional[int] = None
+    restricted: Optional[bool] = None
+    pod_security_context: Optional[dict[str, Any]] = None
+    container_security_context: Optional[dict[str, Any]] = None
 
 
 class PolicyResponse(BaseModel):
@@ -61,7 +69,6 @@ class PolicyLifecycleData(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-
 def _clamp_policy(data: dict) -> dict:
     """Clamp policy values against env var hard caps."""
     result = {k: v for k, v in data.items() if v is not None}
@@ -72,6 +79,10 @@ def _clamp_policy(data: dict) -> dict:
             status_code=400,
             detail=f"Lifecycle keys are not valid policy fields: {', '.join(unexpected)}",
         )
+    if restricted_enabled(result):
+        errors = restricted_env_errors(result.get("env") or {})
+        if errors:
+            raise HTTPException(status_code=400, detail="; ".join(errors))
 
     # Clamp CPU
     if settings.max_cpu and "cpu_limit" in result:

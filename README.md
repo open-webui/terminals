@@ -42,6 +42,8 @@ kubectl apply -f manifests/operator-deployment.yaml
 
 Set `TERMINALS_BACKEND=kubernetes-operator` when deploying the Terminals service.
 
+For OpenShift, use restricted mode and an OpenShift-compatible Open Terminal image. See [OpenShift deployment](docs/openshift.md).
+
 ### From source (development)
 
 ```bash
@@ -102,6 +104,9 @@ curl -X POST http://localhost:3000/p/data-science/execute \
 | `storage` | string | Persistent volume size (omit for ephemeral storage) |
 | `storage_mode` | string | `per-user`, `shared`, or `shared-rwo` |
 | `idle_timeout_minutes` | int | Minutes of inactivity before the container is cleaned up |
+| `restricted` | bool | Enable restricted Kubernetes/OpenShift pod defaults for this policy |
+| `pod_security_context` | dict | Pod security context override for Kubernetes backends |
+| `container_security_context` | dict | Container security context override for Kubernetes backends |
 > [!NOTE]
 > **Storage limits are fully enforced only on the Kubernetes backends** (via sized PVCs). On the `docker` backend, `storage` (and `TERMINALS_MAX_STORAGE`) caps the container's *writable layer* via Docker's `StorageOpt`, which requires a storage driver that supports it (e.g. overlay2 on XFS with the `pquota` mount option). On unsupported drivers such as overlay2-on-ext4, Terminals logs a warning and provisions without the limit. The persistent `/home/user` directory is bind-mounted from the host and is **not** quota-limited on Docker. Use a Kubernetes backend if you need hard per-user storage caps.
 
@@ -155,6 +160,10 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_MAX_STORAGE` | | Hard cap on storage per container |
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | `per-user`, `shared`, or `shared-rwo` |
+| `TERMINALS_KUBERNETES_RESTRICTED` | `false` | Enable restricted Kubernetes/OpenShift pod defaults globally |
+| `TERMINALS_KUBERNETES_POD_SECURITY_CONTEXT` | | JSON pod security context merged into Kubernetes terminal pods |
+| `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into Kubernetes terminal containers |
+| `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 
 See [`config.py`](terminals/config.py) for the full list.

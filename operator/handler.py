@@ -40,6 +40,16 @@ GROUP = "openwebui.com"
 VERSION = "v1alpha1"
 PLURAL = "terminals"
 
+RESTRICTED_POD_SECURITY_CONTEXT = {
+    "runAsNonRoot": True,
+    "seccompProfile": {"type": "RuntimeDefault"},
+}
+RESTRICTED_CONTAINER_SECURITY_CONTEXT = {
+    "allowPrivilegeEscalation": False,
+    "capabilities": {"drop": ["ALL"]},
+    "runAsNonRoot": True,
+}
+
 
 # ---------------------------------------------------------------------------
 # Startup
@@ -120,6 +130,19 @@ def _format_cpu_count(value: str) -> str:
     if cores.is_integer():
         return str(int(cores))
     return f"{cores:.3f}".rstrip("0").rstrip(".")
+
+
+def _deep_merge(*items: dict | None) -> dict:
+    result = {}
+    for item in items:
+        if not item:
+            continue
+        for key, value in item.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = _deep_merge(result[key], value)
+            else:
+                result[key] = value
+    return result
 
 
 def _resource_limit_env(resources_spec: dict) -> list[dict]:
@@ -279,7 +302,28 @@ def _build_pod_manifest(
         if limits:
             container["resources"]["limits"] = limits
 
+    restricted = bool(spec.get("restricted"))
+    container_security_context = _deep_merge(
+        RESTRICTED_CONTAINER_SECURITY_CONTEXT if restricted else {},
+        spec.get("containerSecurityContext"),
+    )
+    if container_security_context:
+        container["securityContext"] = container_security_context
+
     pod_labels = _labels(name, user_id)
+    pod_spec = {
+        "containers": [container],
+        "volumes": volumes,
+        "restartPolicy": "Always",
+        "enableServiceLinks": False,
+        "automountServiceAccountToken": False,
+    }
+    pod_security_context = _deep_merge(
+        RESTRICTED_POD_SECURITY_CONTEXT if restricted else {},
+        spec.get("podSecurityContext"),
+    )
+    if pod_security_context:
+        pod_spec["securityContext"] = pod_security_context
 
     return {
         "apiVersion": "v1",
@@ -290,13 +334,7 @@ def _build_pod_manifest(
             "labels": pod_labels,
             "ownerReferences": [owner_ref],
         },
-        "spec": {
-            "containers": [container],
-            "volumes": volumes,
-            "restartPolicy": "Always",
-            "enableServiceLinks": False,
-            "automountServiceAccountToken": False,
-        },
+        "spec": pod_spec,
     }
 
 
@@ -352,7 +390,7 @@ def _build_pvc_manifest(
 
     # NOTE: PVCs intentionally have NO ownerReference so they survive
     # Terminal CR deletion.  User workspace data must persist across
-    # idle-reap / re-provision cycles.
+    # idle cleanup and refresh cycles.
     pvc = {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
