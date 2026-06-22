@@ -14,6 +14,7 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.env import build_terminal_env
 
 log = logging.getLogger(__name__)
 
@@ -130,13 +131,17 @@ class KubernetesBackend(Backend):
                 ),
             ),
         ]
-        policy_env = s.get("env", {})
-        for k, v in policy_env.items():
+        terminal_env = build_terminal_env(
+            s.get("env", {}),
+            cpu_limit=s.get("cpu_limit"),
+            memory_limit=s.get("memory_limit"),
+        )
+        for k, v in terminal_env.items():
             env_vars.append(client.V1EnvVar(name=k, value=str(v)))
 
         # Egress filtering is handled inside the container (dnsmasq + ipset +
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
-        has_egress_policy = "OPEN_TERMINAL_ALLOWED_DOMAINS" in policy_env
+        has_egress_policy = "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env
 
         # ---- Resource requirements ---------------------------------------
         resource_reqs = None

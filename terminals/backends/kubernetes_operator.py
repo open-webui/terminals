@@ -20,6 +20,7 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.env import build_terminal_env
 
 log = logging.getLogger(__name__)
 
@@ -129,17 +130,20 @@ class KubernetesOperatorBackend(Backend):
         image = s.get("image", settings.kubernetes_image)
         storage_size = s.get("storage")  # absent = ephemeral
 
-        # Build flat CRD spec aligned with policy schema
+        # Build CRD spec aligned with manifests/terminal-crd.yaml.
         cr_spec: dict = {
             "userId": user_id,
             "image": image,
         }
 
-        # CPU / memory limits (flat — no nesting)
+        # CPU / memory limits
+        limits = {}
         if s.get("cpu_limit"):
-            cr_spec["cpuLimit"] = s["cpu_limit"]
+            limits["cpu"] = s["cpu_limit"]
         if s.get("memory_limit"):
-            cr_spec["memoryLimit"] = s["memory_limit"]
+            limits["memory"] = s["memory_limit"]
+        if limits:
+            cr_spec["resources"] = {"limits": limits}
 
         # Storage: present = persistent, absent = ephemeral
         if storage_size:
@@ -151,7 +155,11 @@ class KubernetesOperatorBackend(Backend):
             cr_spec["storageMode"] = storage_mode
 
         # Env vars
-        env = s.get("env", {})
+        env = build_terminal_env(
+            s.get("env", {}),
+            cpu_limit=s.get("cpu_limit"),
+            memory_limit=s.get("memory_limit"),
+        )
         if env:
             cr_spec["env"] = env
 

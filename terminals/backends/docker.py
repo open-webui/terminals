@@ -14,6 +14,7 @@ import httpx
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.env import build_terminal_env
 from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
 
 log = logging.getLogger(__name__)
@@ -89,15 +90,19 @@ class DockerBackend(Backend):
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
         # Grant CAP_NET_ADMIN so the entrypoint can set up iptables rules
         # (the capability gets permanently dropped via capsh after setup).
-        policy_env = s.get("env", {})
-        if "OPEN_TERMINAL_ALLOWED_DOMAINS" in policy_env:
+        terminal_env = build_terminal_env(
+            s.get("env", {}),
+            cpu_limit=s.get("cpu_limit"),
+            memory_limit=s.get("memory_limit"),
+        )
+        if "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env:
             host_config["CapAdd"] = ["NET_ADMIN"]
         if settings.network:
             host_config["NetworkMode"] = settings.network
 
         # Env vars
         env = [f"OPEN_TERMINAL_API_KEY={api_key}"]
-        for k, v in policy_env.items():
+        for k, v in terminal_env.items():
             env.append(f"{k}={v}")
 
         config: dict = {

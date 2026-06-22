@@ -17,6 +17,7 @@ Ported from the ``kubernetes-controller`` branch with the ABC-compatible
 import base64
 import logging
 import os
+import re
 import secrets
 import string
 from datetime import datetime, timezone
@@ -89,6 +90,67 @@ def _resource_name(name: str, suffix: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(Ki|Mi|Gi|Ti)?$")
+_CPU_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(m)?$")
+_SIZE_MULT = {"": 1, "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+
+
+def _parse_size(value: str) -> int:
+    m = _SIZE_RE.match(str(value).strip())
+    if not m:
+        return int(value)
+    num, suffix = float(m.group(1)), m.group(2) or ""
+    return int(num * _SIZE_MULT[suffix])
+
+
+def _parse_cpu_nanos(value: str) -> int:
+    m = _CPU_RE.match(str(value).strip())
+    if not m:
+        return int(float(value) * 1_000_000_000)
+    num, suffix = float(m.group(1)), m.group(2) or ""
+    if suffix == "m":
+        return int(num * 1_000_000)
+    return int(num * 1_000_000_000)
+
+
+def _format_cpu_count(value: str) -> str:
+    cores = _parse_cpu_nanos(value) / 1_000_000_000
+    if cores.is_integer():
+        return str(int(cores))
+    return f"{cores:.3f}".rstrip("0").rstrip(".")
+
+
+def _resource_limit_env(resources_spec: dict) -> list[dict]:
+    limits = resources_spec.get("limits", {})
+    env = []
+
+    cpu_limit = limits.get("cpu")
+    if cpu_limit:
+        cpu_limit = str(cpu_limit)
+        env.append({"name": "OPEN_TERMINAL_CPU_LIMIT", "value": cpu_limit})
+        env.append(
+            {"name": "OPEN_TERMINAL_CPU_COUNT", "value": _format_cpu_count(cpu_limit)}
+        )
+
+    memory_limit = limits.get("memory")
+    if memory_limit:
+        memory_limit = str(memory_limit)
+        env.append({"name": "OPEN_TERMINAL_MEMORY_LIMIT", "value": memory_limit})
+        env.append(
+            {"name": "OPEN_TERMINAL_MEMORY_BYTES", "value": str(_parse_size(memory_limit))}
+        )
+
+    return env
+
+
+def _set_env_var(env: list[dict], name: str, value: str) -> None:
+    for item in env:
+        if item.get("name") == name:
+            item["value"] = value
+            return
+    env.append({"name": name, "value": value})
 
 
 def _owner_ref(body: dict) -> dict:
@@ -172,7 +234,15 @@ def _build_pod_manifest(
     if packages:
         env.append({"name": "OPEN_TERMINAL_PACKAGES", "value": " ".join(packages)})
     if pip_packages:
-        env.append({"name": "OPEN_TERMINAL_PIP_PACKAGES", "value": " ".join(pip_packages)})
+        env.append(
+            {"name": "OPEN_TERMINAL_PIP_PACKAGES", "value": " ".join(pip_packages)}
+        )
+    for key, value in spec.get("env", {}).items():
+        key = str(key)
+        if key != "OPEN_TERMINAL_API_KEY" and value is not None:
+            _set_env_var(env, key, str(value))
+    for item in _resource_limit_env(resources_spec):
+        _set_env_var(env, item["name"], item["value"])
 
     volume_mounts = []
     volumes = []
