@@ -40,7 +40,10 @@ active_ws_connections: int = 0
 async def _get_proxy_client() -> httpx.AsyncClient:
     global _proxy_client
     if _proxy_client is None:
-        _proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        _proxy_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=10.0),
+            limits=httpx.Limits(keepalive_expiry=4.0),
+        )
     return _proxy_client
 
 
@@ -170,6 +173,21 @@ async def _proxy_request(
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
                     content='{"error": "Terminal instance not reachable"}',
+                    status_code=502,
+                    media_type="application/json",
+                )
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+            if attempt < max_retries - 1:
+                logger.debug(
+                    "Proxy attempt {} to {} hit a stale upstream connection ({}), retrying...",
+                    attempt + 1,
+                    target_url,
+                    e,
+                )
+            else:
+                logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
+                return Response(
+                    content='{"error": "Upstream connection failed"}',
                     status_code=502,
                     media_type="application/json",
                 )
@@ -561,5 +579,4 @@ async def ws_policy_terminal_proxy(
         return
 
     await _ws_proxy_handler(ws, session_id, effective_user, policy_id=_id, spec=spec)
-
 
