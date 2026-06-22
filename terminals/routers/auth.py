@@ -86,6 +86,34 @@ async def verify_api_key(
     return None
 
 
+async def verify_admin_api_key(
+    authorization: Optional[str] = Header(None),
+) -> None:
+    """Validate admin control-plane access.
+
+    User JWTs are intentionally not sufficient for policy or lifecycle
+    administration. When Open WebUI auth is enabled, callers must still use
+    the Terminals admin API key.
+    """
+    if settings.api_key:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Missing Authorization header")
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or token != settings.api_key:
+            raise HTTPException(status_code=401, detail="Invalid admin API key")
+        return None
+
+    if settings.open_webui_url:
+        raise HTTPException(
+            status_code=401,
+            detail="TERMINALS_API_KEY is required for admin APIs",
+        )
+
+    # Open access remains available for local development when no auth mode is
+    # configured, matching the existing API-key behavior.
+    return None
+
+
 async def verify_user_id(
     verified_id: Optional[str] = Depends(verify_api_key),
     x_user_id: str = Header(..., alias="X-User-Id"),

@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -299,6 +300,17 @@ class DockerBackend(Backend):
             await container.delete(force=True)
         except aiodocker.exceptions.DockerError:
             log.warning("Could not remove container %s (may already be gone)", instance_id)
+
+    async def reset(
+        self, user_id: str, policy_id: str, spec: dict | None = None
+    ) -> None:
+        home_dir = (Path(settings.data_dir) / user_id).resolve()
+        home_dir.mkdir(parents=True, exist_ok=True)
+        for child in home_dir.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
 
     async def status(self, instance_id: str) -> str:
         docker = await self._get_docker()

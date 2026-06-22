@@ -1,14 +1,19 @@
 """Policy CRUD API."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from terminals.config import settings
 from terminals.db.session import async_session
-from terminals.routers.auth import verify_api_key
+from terminals.routers.auth import verify_admin_api_key
+from terminals.utils.policy_lifecycle import (
+    get_lifecycle_data,
+    upsert_lifecycle_data,
+    validate_lifecycle_data,
+)
 from terminals.utils.parsing import parse_size
 
 router = APIRouter(prefix="/api/v1", tags=["policies"])
@@ -21,6 +26,8 @@ router = APIRouter(prefix="/api/v1", tags=["policies"])
 
 class PolicyData(BaseModel):
     """Policy data — all fields optional, merged with defaults."""
+    model_config = ConfigDict(extra="allow")
+
     image: Optional[str] = None
     env: Optional[dict] = None
     cpu_limit: Optional[str] = None
@@ -42,6 +49,13 @@ class PolicyCreate(BaseModel):
     data: PolicyData = PolicyData()
 
 
+class PolicyLifecycleData(BaseModel):
+    """Policy lifecycle config, stored separately from provisioning policy."""
+    model_config = ConfigDict(extra="allow")
+
+    reset: Optional[dict[str, Any]] = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -51,6 +65,13 @@ class PolicyCreate(BaseModel):
 def _clamp_policy(data: dict) -> dict:
     """Clamp policy values against env var hard caps."""
     result = {k: v for k, v in data.items() if v is not None}
+    lifecycle_keys = {"reset", "reset_schedule", "reset_timezone", "lifecycle"}
+    unexpected = sorted(lifecycle_keys.intersection(result))
+    if unexpected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Lifecycle keys are not valid policy fields: {', '.join(unexpected)}",
+        )
 
     # Clamp CPU
     if settings.max_cpu and "cpu_limit" in result:
@@ -89,6 +110,13 @@ def _clamp_policy(data: dict) -> dict:
     return result
 
 
+def _validate_lifecycle(data: dict) -> dict:
+    result = {k: v for k, v in data.items() if v is not None}
+    if not validate_lifecycle_data(result):
+        raise HTTPException(status_code=400, detail="Invalid lifecycle configuration")
+    return result
+
+
 def _merge_defaults(policy_data: dict) -> dict:
     """Merge env var defaults with policy overrides."""
     defaults = {}
@@ -102,7 +130,7 @@ def _merge_defaults(policy_data: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/policies", dependencies=[Depends(verify_api_key)])
+@router.get("/policies", dependencies=[Depends(verify_admin_api_key)])
 async def list_policies():
     """List all policies."""
     if async_session is None:
@@ -125,7 +153,7 @@ async def list_policies():
         ]
 
 
-@router.post("/policies", dependencies=[Depends(verify_api_key)], status_code=201)
+@router.post("/policies", dependencies=[Depends(verify_admin_api_key)], status_code=201)
 async def create_policy(body: PolicyCreate):
     """Create a new policy."""
     if async_session is None:
@@ -158,7 +186,7 @@ async def create_policy(body: PolicyCreate):
         )
 
 
-@router.get("/policies/{policy_id}", dependencies=[Depends(verify_api_key)])
+@router.get("/policies/{policy_id}", dependencies=[Depends(verify_admin_api_key)])
 async def get_policy(policy_id: str):
     """Get a single policy."""
     if async_session is None:
@@ -181,7 +209,32 @@ async def get_policy(policy_id: str):
         )
 
 
-@router.put("/policies/{policy_id}", dependencies=[Depends(verify_api_key)])
+@router.get("/policies/{policy_id}/lifecycle", dependencies=[Depends(verify_admin_api_key)])
+async def get_policy_lifecycle(policy_id: str):
+    """Get policy lifecycle configuration."""
+    if async_session is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    return {
+        "policy_id": policy_id,
+        "data": await get_lifecycle_data(policy_id),
+    }
+
+
+@router.put("/policies/{policy_id}/lifecycle", dependencies=[Depends(verify_admin_api_key)])
+async def put_policy_lifecycle(policy_id: str, body: PolicyLifecycleData):
+    """Create or update policy lifecycle configuration."""
+    if async_session is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    data = _validate_lifecycle(body.model_dump(exclude_none=True))
+    return {
+        "policy_id": policy_id,
+        "data": await upsert_lifecycle_data(policy_id, data),
+    }
+
+
+@router.put("/policies/{policy_id}", dependencies=[Depends(verify_admin_api_key)])
 async def upsert_policy(policy_id: str, body: PolicyData):
     """Create or update a policy."""
     if async_session is None:
@@ -218,7 +271,7 @@ async def upsert_policy(policy_id: str, body: PolicyData):
         )
 
 
-@router.delete("/policies/{policy_id}", dependencies=[Depends(verify_api_key)])
+@router.delete("/policies/{policy_id}", dependencies=[Depends(verify_admin_api_key)])
 async def delete_policy(policy_id: str):
     """Delete a policy."""
     if async_session is None:

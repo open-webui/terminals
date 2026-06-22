@@ -379,6 +379,84 @@ class KubernetesBackend(Backend):
 
         # Note: PVC is intentionally kept for data persistence.
 
+    async def reset(
+        self, user_id: str, policy_id: str, spec: dict | None = None
+    ) -> None:
+        api_client = await self._ensure_client()
+        core = client.CoreV1Api(api_client)
+        ns = settings.kubernetes_namespace
+        s = spec or {}
+        storage_size = s.get("storage", settings.kubernetes_storage_size)
+        if not storage_size:
+            return
+
+        storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
+        terminal_name = _sanitize_name(user_id, policy_id)
+        reset_name = f"{terminal_name[:57]}-reset"
+        shared_pvc_name = f"terminals-shared-{ns}"
+        claim_name = terminal_name
+        sub_path = None
+        if storage_mode in ("shared", "shared-rwo"):
+            claim_name = shared_pvc_name
+            sub_path = user_id
+
+        try:
+            await core.read_namespaced_persistent_volume_claim(claim_name, ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return
+            raise
+
+        labels = _base_labels(user_id)
+        labels["openwebui.com/policy"] = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        labels["openwebui.com/reset"] = "true"
+
+        volume_mount = client.V1VolumeMount(
+            name="home",
+            mount_path="/home/user",
+            sub_path=sub_path,
+        )
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                containers=[
+                    client.V1Container(
+                        name="reset",
+                        image="busybox:1.36",
+                        command=[
+                            "sh",
+                            "-c",
+                            "find /home/user -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
+                        ],
+                        volume_mounts=[volume_mount],
+                    )
+                ],
+                volumes=[
+                    client.V1Volume(
+                        name="home",
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=claim_name,
+                        ),
+                    )
+                ],
+            ),
+        )
+
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+            await self._wait_for_pod_deletion(core, reset_name, ns, timeout=30)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        await core.create_namespaced_pod(ns, pod)
+        await self._wait_for_reset_pod(core, reset_name, ns)
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+        except client.exceptions.ApiException:
+            pass
+
     async def status(self, instance_id: str) -> str:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
@@ -521,6 +599,20 @@ class KubernetesBackend(Backend):
                 raise
             await asyncio.sleep(0.5)
         log.warning("Pod %s not fully deleted after %ds", name, timeout)
+
+    async def _wait_for_reset_pod(
+        self, core: client.CoreV1Api, name: str, ns: str, timeout: int = 120,
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            pod = await core.read_namespaced_pod(name, ns)
+            phase = pod.status.phase
+            if phase == "Succeeded":
+                return
+            if phase == "Failed":
+                raise RuntimeError(f"Reset pod {name} failed")
+            await asyncio.sleep(1)
+        raise TimeoutError(f"Reset pod {name} did not finish within {timeout}s")
 
     async def _ensure_shared_pvc(
         self,

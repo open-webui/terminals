@@ -18,7 +18,7 @@ from typing import Optional
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
-from terminals.backends.base import Backend
+from terminals.backends.base import Backend, RefreshResult
 from terminals.config import settings
 from terminals.utils.env import build_terminal_env
 
@@ -153,6 +153,13 @@ class KubernetesOperatorBackend(Backend):
             # Storage mode (per-user, shared, shared-rwo)
             storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
             cr_spec["storageMode"] = storage_mode
+            cr_spec["persistence"] = {
+                "enabled": True,
+                "size": storage_size,
+                "storageClass": settings.kubernetes_storage_class,
+            }
+        else:
+            cr_spec["persistence"] = {"enabled": False}
 
         # Env vars
         env = build_terminal_env(
@@ -373,6 +380,152 @@ class KubernetesOperatorBackend(Backend):
             return host, int(port_str)
         return url, 8000
 
+    async def _wait_for_reset_pod(
+        self, core: client.CoreV1Api, name: str, namespace: str, timeout: int = 120
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            pod = await core.read_namespaced_pod(name, namespace)
+            phase = pod.status.phase
+            if phase == "Succeeded":
+                return
+            if phase == "Failed":
+                raise RuntimeError(f"Reset pod {name} failed")
+            await asyncio.sleep(1)
+        raise TimeoutError(f"Reset pod {name} did not finish within {timeout}s")
+
+    async def _wait_for_pod_deletion(
+        self, core: client.CoreV1Api, name: str, namespace: str, timeout: int = 30
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await core.read_namespaced_pod(name, namespace)
+            except client.exceptions.ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            await asyncio.sleep(0.5)
+
+    async def reset(
+        self, user_id: str, policy_id: str, spec: dict | None = None
+    ) -> None:
+        api_client = await self._ensure_client()
+        core = client.CoreV1Api(api_client)
+        ns = settings.kubernetes_namespace
+        terminal_name = _sanitize_name(user_id, policy_id)
+        reset_name = f"{terminal_name[:57]}-reset"
+        claim_name = f"{terminal_name}-pvc"
+
+        try:
+            await core.read_namespaced_persistent_volume_claim(claim_name, ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return
+            raise
+
+        labels = {
+            "app.kubernetes.io/managed-by": "terminals",
+            "app.kubernetes.io/part-of": "open-terminal",
+            "openwebui.com/user-id": user_id,
+            "openwebui.com/policy": _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20],
+            "openwebui.com/reset": "true",
+        }
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                containers=[
+                    client.V1Container(
+                        name="reset",
+                        image="busybox:1.36",
+                        command=[
+                            "sh",
+                            "-c",
+                            "find /home/user -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
+                        ],
+                        volume_mounts=[
+                            client.V1VolumeMount(name="home", mount_path="/home/user")
+                        ],
+                    )
+                ],
+                volumes=[
+                    client.V1Volume(
+                        name="home",
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=claim_name,
+                        ),
+                    )
+                ],
+            ),
+        )
+
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+            await self._wait_for_pod_deletion(core, reset_name, ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        await core.create_namespaced_pod(ns, pod)
+        await self._wait_for_reset_pod(core, reset_name, ns)
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+        except client.exceptions.ApiException:
+            pass
+
+    async def refresh(
+        self,
+        *,
+        user_id: str | None = None,
+        policy_id: str | None = None,
+        only_idle: bool = True,
+        reset: bool = False,
+    ) -> RefreshResult:
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        ns = settings.kubernetes_namespace
+        result = RefreshResult()
+
+        selector = "app.kubernetes.io/managed-by=terminals"
+        crs = await custom.list_namespaced_custom_object(
+            group=self._group,
+            version=self._version,
+            namespace=ns,
+            plural=self._plural,
+            label_selector=selector,
+        )
+        for item in crs.get("items", []):
+            labels = item.get("metadata", {}).get("labels", {})
+            item_user = labels.get("openwebui.com/user-id") or item.get("spec", {}).get("userId")
+            item_policy = labels.get("openwebui.com/policy", "default")
+            if user_id and item_user != user_id:
+                continue
+            if policy_id and item_policy != policy_id:
+                continue
+
+            result.matched += 1
+            phase = (item.get("status") or {}).get("phase")
+            if only_idle and phase == "Running":
+                result.skipped_active += 1
+                continue
+
+            name = item["metadata"]["name"]
+            await custom.delete_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                name=name,
+            )
+            result.refreshed += 1
+
+            if reset and item_user:
+                await self.reset(item_user, item_policy, item.get("spec") or {})
+                result.reset += 1
+
+        return result
+
     # ------------------------------------------------------------------
     # Backend interface
     # ------------------------------------------------------------------
@@ -536,6 +689,7 @@ class KubernetesOperatorBackend(Backend):
             cr = await self._get_terminal_cr(user_id, policy_id)
 
             if cr is None:
+                await self._apply_due_reset(user_id, policy_id, spec)
                 return await self.provision(user_id, policy_id=policy_id, spec=spec)
 
             status = cr.get("status") or {}
@@ -548,6 +702,7 @@ class KubernetesOperatorBackend(Backend):
                     phase,
                 )
                 await self._delete_terminal_cr(user_id, policy_id)
+                await self._apply_due_reset(user_id, policy_id, spec)
                 return await self.provision(user_id, policy_id=policy_id, spec=spec)
 
             if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):

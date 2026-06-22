@@ -4,19 +4,17 @@ Reads the database URL from ``terminals.config.settings`` so the
 connection string is never hardcoded in ``alembic.ini``.
 """
 
-import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from terminals.config import settings
 
 # Import *all* models so Base.metadata is fully populated.
 from terminals.models.base import Base  # noqa: F401
-from terminals.models.policy import Policy  # noqa: F401
+from terminals.models.policy import Policy, PolicyLifecycle, PolicyLifecycleState  # noqa: F401
 
 # Alembic Config object — gives access to alembic.ini values.
 config = context.config

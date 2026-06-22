@@ -20,6 +20,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
     "alembic>=1.13.0",
+    "croniter>=6.0.0",
 ]
 
 [project.scripts]
@@ -31,3 +32,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["terminals"]
+include = [
+    "terminals/**/*.py",
+    "terminals/alembic.ini",
+    "terminals/migrations/**/*",
+    "terminals/frontend/build/**/*",
+]

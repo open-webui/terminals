@@ -6,7 +6,7 @@ and reconciles the underlying Kubernetes resources:
 - **Secret** holding a generated API key
 - **Pod** running the open-terminal container
 - **Service** (ClusterIP) exposing port 8000
-- **PVC** (optional) for persistent ``/workspace`` storage
+- **PVC** (optional) for persistent ``/home/user`` storage
 
 The orchestrator creates/deletes Terminal CRs; this operator does the rest.
 
@@ -247,9 +247,9 @@ def _build_pod_manifest(
     volume_mounts = []
     volumes = []
     if pvc_name:
-        volume_mounts.append({"name": "workspace", "mountPath": "/workspace"})
+        volume_mounts.append({"name": "home", "mountPath": "/home/user"})
         volumes.append(
-            {"name": "workspace", "persistentVolumeClaim": {"claimName": pvc_name}}
+            {"name": "home", "persistentVolumeClaim": {"claimName": pvc_name}}
         )
 
     container = {

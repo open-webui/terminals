@@ -4,11 +4,22 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from terminals.config import settings
+from terminals.utils.policy_lifecycle import mark_reset_applied, reset_due_for
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class RefreshResult:
+    matched: int = 0
+    refreshed: int = 0
+    reset: int = 0
+    skipped_active: int = 0
 
 
 class Backend(ABC):
@@ -23,6 +34,7 @@ class Backend(ABC):
     def __init__(self) -> None:
         # key = "{user_id}:{policy_id}"
         self._activity: dict[str, float] = {}      # → last-active unix timestamp
+        self._activity_wall: dict[str, float] = {} # → last-active wall-clock timestamp
         self._instances: dict[str, dict] = {}       # → provision result dict
         self._specs: dict[str, dict] = {}           # → resolved policy spec
         self._locks: dict[str, asyncio.Lock] = {}   # → per-key provisioning lock
@@ -65,6 +77,12 @@ class Backend(ABC):
     async def close(self) -> None:
         """Release resources on shutdown."""
 
+    async def reset(
+        self, user_id: str, policy_id: str, spec: Optional[dict] = None
+    ) -> None:
+        """Delete persisted files for a user terminal."""
+        raise NotImplementedError("Reset is not supported by this backend")
+
     # ------------------------------------------------------------------
     # Instance tracking
     # ------------------------------------------------------------------
@@ -72,6 +90,10 @@ class Backend(ABC):
     @staticmethod
     def _key(user_id: str, policy_id: str = "default") -> str:
         return f"{user_id}:{policy_id}"
+
+    def _record_activity(self, key: str) -> None:
+        self._activity[key] = time.monotonic()
+        self._activity_wall[key] = time.time()
 
     async def ensure_terminal(
         self,
@@ -94,7 +116,7 @@ class Backend(ABC):
             info = self._instances[key]
             st = await self.status(info["instance_id"])
             if st == "running":
-                self._activity[key] = time.monotonic()
+                self._record_activity(key)
                 return info
 
         # Serialise provisioning per key.
@@ -108,17 +130,19 @@ class Backend(ABC):
                 info = self._instances[key]
                 st = await self.status(info["instance_id"])
                 if st == "running":
-                    self._activity[key] = time.monotonic()
+                    self._record_activity(key)
                     return info
                 self._instances.pop(key, None)
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
+                self._activity_wall.pop(key, None)
 
+            await self._apply_due_reset(user_id, policy_id, spec)
             result = await self.provision(user_id, policy_id=policy_id, spec=spec)
             if result:
                 self._instances[key] = result
                 self._specs[key] = spec or {}
-                self._activity[key] = time.monotonic()
+                self._record_activity(key)
             return result
 
     async def get_terminal_info(self, user_id: str) -> Optional[dict]:
@@ -130,7 +154,109 @@ class Backend(ABC):
     ) -> None:
         """Record that *user_id*'s terminal is actively being used."""
         key = self._key(user_id, policy_id)
-        self._activity[key] = time.monotonic()
+        self._record_activity(key)
+
+    async def _apply_due_reset(
+        self, user_id: str, policy_id: str, spec: Optional[dict]
+    ) -> bool:
+        if not await reset_due_for(user_id, policy_id, spec):
+            return False
+        await self.reset(user_id, policy_id, spec)
+        await mark_reset_applied(user_id, policy_id, spec)
+        log.info("Reset files for user=%s policy=%s", user_id, policy_id)
+        return True
+
+    def _tracked_items(
+        self,
+        *,
+        user_id: str | None = None,
+        policy_id: str | None = None,
+    ) -> list[tuple[str, str, str, dict, dict]]:
+        matches = []
+        for key, info in list(self._instances.items()):
+            item_user, item_policy = key.split(":", 1)
+            if user_id and item_user != user_id:
+                continue
+            if policy_id and item_policy != policy_id:
+                continue
+            matches.append((key, item_user, item_policy, info, self._specs.get(key, {})))
+        return matches
+
+    def _is_idle_by_activity(self, key: str, spec: Optional[dict], now: float) -> bool:
+        timeout_min = (spec or {}).get(
+            "idle_timeout_minutes", settings.idle_timeout_minutes
+        )
+        if not timeout_min or timeout_min <= 0:
+            return False
+        last_active = self._activity.get(key, now)
+        return now - last_active >= timeout_min * 60
+
+    async def refresh(
+        self,
+        *,
+        user_id: str | None = None,
+        policy_id: str | None = None,
+        only_idle: bool = True,
+        reset: bool = False,
+    ) -> RefreshResult:
+        """Tear down matching terminals so the next access provisions fresh."""
+        result = RefreshResult()
+        now = time.monotonic()
+
+        for key, item_user, item_policy, info, spec in self._tracked_items(
+            user_id=user_id, policy_id=policy_id
+        ):
+            result.matched += 1
+            st = await self.status(info["instance_id"])
+            idle = st != "running" or self._is_idle_by_activity(key, spec, now)
+            if only_idle and not idle:
+                result.skipped_active += 1
+                continue
+
+            await self.teardown(info["instance_id"])
+            self._instances.pop(key, None)
+            self._specs.pop(key, None)
+            self._activity.pop(key, None)
+            self._activity_wall.pop(key, None)
+            self._locks.pop(key, None)
+            result.refreshed += 1
+
+            if reset:
+                await self.reset(item_user, item_policy, spec)
+                result.reset += 1
+
+        return result
+
+    async def list_terminals(self) -> list[dict]:
+        """Return sanitized tracked terminal instances for the admin UI."""
+        rows = []
+        now = time.monotonic()
+        for key, user_id, policy_id, info, spec in self._tracked_items():
+            status = await self.status(info["instance_id"])
+            last_active = self._activity.get(key)
+            last_active_wall = self._activity_wall.get(key)
+            timeout_min = (spec or {}).get(
+                "idle_timeout_minutes", settings.idle_timeout_minutes
+            )
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "policy_id": policy_id,
+                    "status": status,
+                    "instance_id": info.get("instance_id", ""),
+                    "instance_name": info.get("instance_name", info.get("instance_id", "")),
+                    "host": info.get("host", ""),
+                    "port": info.get("port"),
+                    "last_active_at": (
+                        datetime.fromtimestamp(last_active_wall, timezone.utc).isoformat()
+                        if last_active_wall
+                        else None
+                    ),
+                    "idle_seconds": int(now - last_active) if last_active else None,
+                    "idle_timeout_minutes": timeout_min or 0,
+                }
+            )
+        return rows
 
     # ------------------------------------------------------------------
     # Idle reaper
@@ -201,7 +327,14 @@ class Backend(ABC):
                     await self.teardown(info["instance_id"])
                 except Exception:
                     log.exception("Failed to tear down %s", key)
+                try:
+                    await self._apply_due_reset(user_id, policy_id, spec)
+                except NotImplementedError:
+                    log.warning("Reset due for %s but backend does not support it", key)
+                except Exception:
+                    log.exception("Failed to reset files for %s", key)
                 self._instances.pop(key, None)
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
+                self._activity_wall.pop(key, None)
                 self._locks.pop(key, None)
