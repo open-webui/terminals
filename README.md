@@ -103,6 +103,9 @@ curl -X POST http://localhost:3000/p/data-science/execute \
 | `storage_mode` | string | `per-user`, `shared`, or `shared-rwo` |
 | `idle_timeout_minutes` | int | Minutes of inactivity before the container is cleaned up |
 
+> [!NOTE]
+> **Storage limits are fully enforced only on the Kubernetes backends** (via sized PVCs). On the `docker` backend, `storage` (and `TERMINALS_MAX_STORAGE`) caps the container's *writable layer* via Docker's `StorageOpt`, which requires a storage driver that supports it (e.g. overlay2 on XFS with the `pquota` mount option). On unsupported drivers such as overlay2-on-ext4, Terminals logs a warning and provisions without the limit. The persistent `/home/user` directory is bind-mounted from the host and is **not** quota-limited on Docker. Use a Kubernetes backend if you need hard per-user storage caps.
+
 ## Configuration
 
 All settings are configured through environment variables prefixed with `TERMINALS_`, or via a `.env` file.

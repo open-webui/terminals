@@ -14,7 +14,7 @@ import httpx
 
 from terminals.backends.base import Backend
 from terminals.config import settings
-from terminals.utils.parsing import parse_cpu_nanos, parse_memory
+from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +73,18 @@ class DockerBackend(Backend):
         if s.get("cpu_limit"):
             host_config["NanoCpus"] = parse_cpu_nanos(s["cpu_limit"])
 
+        # Storage caps the container's writable layer via StorageOpt — not the
+        # bind-mounted /home/user where user files persist (Docker can't quota a
+        # bind mount).  It also needs a storage driver that supports it (e.g.
+        # overlay2 on xfs with pquota); on others the create below fails, so the
+        # loop drops the quota and retries.  Use Kubernetes for hard limits.
+        if s.get("storage"):
+            host_config["StorageOpt"] = {"size": str(parse_size(s["storage"]))}
+            log.info(
+                "Applying storage quota %s to writable layer of %s (/home/user not limited)",
+                s["storage"], instance_name,
+            )
+
         # Egress filtering is handled inside the container (dnsmasq + ipset +
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
         # Grant CAP_NET_ADMIN so the entrypoint can set up iptables rules
@@ -123,6 +135,19 @@ class DockerBackend(Backend):
                     except aiodocker.exceptions.DockerError:
                         pass
                     await asyncio.sleep(1)
+                    continue
+                # The storage driver may not support StorageOpt size quotas
+                # (e.g. overlay2 on ext4).  Drop the quota and retry once rather
+                # than failing to provision.  host_config is the same object
+                # referenced by config["HostConfig"], so this mutation applies
+                # to the next create attempt.
+                if "StorageOpt" in host_config:
+                    log.warning(
+                        "Storage quota not supported by the Docker storage driver "
+                        "for %s (%s), provisioning without a storage limit",
+                        instance_name, exc,
+                    )
+                    host_config.pop("StorageOpt", None)
                     continue
                 log.error("Failed to provision container for %s: %s", user_id, exc)
                 raise
