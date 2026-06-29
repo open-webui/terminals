@@ -16,13 +16,11 @@ The per-user Open Terminal API key is generated here and baked into the Sandbox'
 pod template env (``OPEN_TERMINAL_API_KEY``); it is read back from the Sandbox object
 when resolving connection info, so the backend stays stateless across restarts.
 
-Targets agent-sandbox ``v1beta1`` (v0.5.x).  The capabilities this backend still
-self-manages — deciding *when* to suspend based on request activity, and generating
-the per-user key — are on the upstream roadmap (``Auto Suspend/Resume``, ``Scale to
-Zero``, ``Sandbox/Pod Identity Association``); aligning to v1beta1 positions us to
-drop those shims as the controller gains them.  The v0.4.x API used a ``replicas``
-field instead of ``operatingMode``; pin ``TERMINALS_SANDBOX_VERSION=v1alpha1`` and
-adjust :meth:`_set_operating_mode` if you must target the older controller.
+Targets the agent-sandbox ``v1beta1`` API (v0.5.0+).  The capabilities this backend
+still self-manages — deciding *when* to suspend based on request activity, and
+generating the per-user key — are on the upstream roadmap (``Auto Suspend/Resume``,
+``Scale to Zero``, ``Sandbox/Pod Identity Association``); we can drop those shims as
+the controller gains them.
 """
 
 import asyncio

@@ -1,8 +1,8 @@
 # RBAC for the Terminals service to drive Agent Sandbox CRDs.
 #
-# Apply AFTER installing the agent-sandbox controller + extensions:
-#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<VER>/manifest.yaml
-#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<VER>/extensions.yaml
+# Apply AFTER installing the agent-sandbox controller + extensions (v0.5.0+):
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/manifest.yaml
+#   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/extensions.yaml
 #   kubectl apply -f manifests/sandbox-rbac.yaml
 #
 # The Terminals Deployment must set `serviceAccountName: terminals` and

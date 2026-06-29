@@ -48,7 +48,7 @@ suspend, not teardown, so normal inactivity never destroys data.
 
 ```bash
 # 1. Install the agent-sandbox controller + extensions (pin a release version)
-export VERSION="v0.5.0rc1"  # see https://github.com/kubernetes-sigs/agent-sandbox/releases
+export VERSION="v0.5.0"  # see https://github.com/kubernetes-sigs/agent-sandbox/releases
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 
