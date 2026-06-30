@@ -15,6 +15,7 @@ Ported from the ``kubernetes-controller`` branch with the ABC-compatible
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -100,6 +101,29 @@ def _resource_name(name: str, suffix: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _json_env(name: str, default):
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("Ignoring invalid JSON in %s", name)
+        return default
+    return value
+
+
+def _pod_scheduling_overrides() -> dict:
+    overrides = {}
+    node_selector = _json_env("TERMINALS_KUBERNETES_NODE_SELECTOR", {})
+    tolerations = _json_env("TERMINALS_KUBERNETES_TOLERATIONS", [])
+    if isinstance(node_selector, dict) and node_selector:
+        overrides["nodeSelector"] = {str(k): str(v) for k, v in node_selector.items()}
+    if isinstance(tolerations, list) and tolerations:
+        overrides["tolerations"] = tolerations
+    return overrides
 
 
 _SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(Ki|Mi|Gi|Ti)?$")
@@ -318,6 +342,7 @@ def _build_pod_manifest(
         "enableServiceLinks": False,
         "automountServiceAccountToken": False,
     }
+    pod_spec.update(_pod_scheduling_overrides())
     pod_security_context = _deep_merge(
         RESTRICTED_POD_SECURITY_CONTEXT if restricted else {},
         spec.get("podSecurityContext"),

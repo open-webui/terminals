@@ -161,6 +161,8 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | `per-user`, `shared`, or `shared-rwo` |
 | `TERMINALS_KUBERNETES_RESTRICTED` | `false` | Enable restricted Kubernetes/OpenShift pod defaults globally |
+| `TERMINALS_KUBERNETES_NODE_SELECTOR` | | JSON object of node labels to apply as `nodeSelector` on Kubernetes terminal pods, e.g. `{"node-pool":"terminals"}` |
+| `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of Kubernetes tolerations to apply to Kubernetes terminal pods |
 | `TERMINALS_KUBERNETES_POD_SECURITY_CONTEXT` | | JSON pod security context merged into Kubernetes terminal pods |
 | `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into Kubernetes terminal containers |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |

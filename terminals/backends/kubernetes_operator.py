@@ -11,7 +11,9 @@ This backend reads the key from the Secret referenced in ``status.apiKeySecret``
 import asyncio
 import base64
 import hashlib
+import json
 import logging
+import os
 import re
 from typing import Optional
 
@@ -43,6 +45,28 @@ def _sanitize_name(user_id: str, policy_id: str = "default") -> str:
         return f"terminal-{short}"
     policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
     return f"terminal-{short}-{policy_slug}"
+
+
+def _json_env(name: str, default):
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("Ignoring invalid JSON in %s", name)
+        return default
+
+
+def _pod_scheduling_overrides() -> dict:
+    overrides = {}
+    node_selector = _json_env("TERMINALS_KUBERNETES_NODE_SELECTOR", {})
+    tolerations = _json_env("TERMINALS_KUBERNETES_TOLERATIONS", [])
+    if isinstance(node_selector, dict) and node_selector:
+        overrides["node_selector"] = {str(k): str(v) for k, v in node_selector.items()}
+    if isinstance(tolerations, list) and tolerations:
+        overrides["tolerations"] = tolerations
+    return overrides
 
 
 class KubernetesOperatorBackend(Backend):
@@ -449,6 +473,7 @@ class KubernetesOperatorBackend(Backend):
             metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
             spec=client.V1PodSpec(
                 restart_policy="Never",
+                **_pod_scheduling_overrides(),
                 containers=[
                     client.V1Container(
                         name="reset",
