@@ -14,6 +14,10 @@ def create_backend() -> Backend:
         from terminals.backends.kubernetes import KubernetesBackend
 
         return KubernetesBackend()
+    elif settings.backend == "kubernetes-operator":
+        from terminals.backends.kubernetes_operator import KubernetesOperatorBackend
+
+        return KubernetesOperatorBackend()
     elif settings.backend == "kubernetes-sandbox":
         from terminals.backends.kubernetes_sandbox import KubernetesSandboxBackend
 

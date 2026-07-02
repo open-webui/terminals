@@ -76,6 +76,20 @@ installed on your nodes.
 > (*Auto Suspend/Resume*, *Scale to Zero*, *Sandbox/Pod Identity Association*); the
 > backend is pinned to `v1beta1` specifically so we can drop these shims as they land.
 
+### Kubernetes with the bundled operator (custom CRD)
+
+The operator backend reconciles a custom `Terminal` CRD with a self-hosted
+[Kopf](https://kopf.readthedocs.io/) operator. Use this if you prefer a
+self-contained controller over the upstream Agent Sandbox project.
+
+```bash
+# 1. Install the Terminal CRD and the operator (Deployment + RBAC)
+kubectl apply -f manifests/terminal-crd.yaml
+kubectl apply -f manifests/operator-deployment.yaml
+```
+
+Set `TERMINALS_BACKEND=kubernetes-operator` when deploying the Terminals service.
+
 ### From source (development)
 
 ```bash
@@ -88,8 +102,11 @@ terminals serve
 | Backend | Best for | How it works |
 |---------|----------|-------------|
 | `docker` | Single-node, local dev | One container per user via Docker socket |
-| `kubernetes-sandbox` | Production K8s clusters | One [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` per user; suspend/resume on idle |
+| `kubernetes-sandbox` | Production K8s clusters (upstream CRD) | One [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` per user; suspend/resume on idle |
+| `kubernetes-operator` | Production K8s clusters (self-hosted operator) | Custom `Terminal` CRD reconciled by the bundled Kopf operator |
 | `kubernetes` | K8s without CRDs | Direct Pod + PVC + Service per user (you manage resources) |
+
+> Both `kubernetes-sandbox` and `kubernetes-operator` are fully supported. The sandbox backend builds on the upstream Agent Sandbox controller; the operator backend uses our own `Terminal` CRD. Pick one per deployment via `TERMINALS_BACKEND`.
 
 Set the backend with `TERMINALS_BACKEND` (defaults to `docker`).
 
@@ -143,7 +160,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-sandbox` |
+| `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, `kubernetes-operator`, or `kubernetes-sandbox` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per container |

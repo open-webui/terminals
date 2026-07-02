@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DATA_DIR}/terminals.db"
 
-    # Backend selection: "docker", "kubernetes", or "kubernetes-sandbox"
+    # Backend selection: "docker", "kubernetes", "kubernetes-operator", "kubernetes-sandbox"
     backend: str = "docker"
 
     # Docker settings
@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     kubernetes_service_type: str = "ClusterIP"
     kubernetes_kubeconfig: str = ""           # empty = in-cluster config
     kubernetes_labels: str = ""               # extra labels as "k=v,k2=v2"
+
+    # Operator settings (TERMINALS_BACKEND=kubernetes-operator)
+    kubernetes_crd_group: str = "openwebui.com"
+    kubernetes_crd_version: str = "v1alpha1"
 
     # Agent Sandbox settings (TERMINALS_BACKEND=kubernetes-sandbox)
     # Upstream project: https://github.com/kubernetes-sigs/agent-sandbox

@@ -1,0 +1,79 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: terminals
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: open-terminal-operator
+  namespace: terminals
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: open-terminal-operator
+rules:
+  # Terminal CRDs
+  - apiGroups: ["openwebui.com"]
+    resources: ["terminals", "terminals/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods, Services, PVCs managed by the operator
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events (Kopf posts events for status)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+  # Kopf needs these for leader election and state tracking
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: open-terminal-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: open-terminal-operator
+subjects:
+  - kind: ServiceAccount
+    name: open-terminal-operator
+    namespace: terminals
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-terminal-operator
+  namespace: terminals
+  labels:
+    app.kubernetes.io/name: open-terminal-operator
+    app.kubernetes.io/part-of: open-terminal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-terminal-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-terminal-operator
+    spec:
+      serviceAccountName: open-terminal-operator
+      containers:
+        - name: operator
+          image: ghcr.io/open-webui/open-terminal-operator:latest
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
