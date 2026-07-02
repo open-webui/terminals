@@ -30,10 +30,11 @@ docker run -p 3000:3000 \
 
 **Prerequisites:** Docker running on the host.
 
-### Kubernetes with Agent Sandbox (recommended for clusters)
+### Kubernetes with Agent Sandbox
 
-For Kubernetes deployments, Terminals builds on the upstream
-[Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) project (SIG Apps).
+The `kubernetes-sandbox` backend is a newer option that runs each user's terminal on the
+upstream [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) project (SIG Apps),
+alongside the existing [operator backend](#kubernetes-with-the-bundled-operator-custom-crd).
 Each user+policy maps to a single `Sandbox` custom resource; the agent-sandbox
 controller reconciles it into a Pod, a headless Service (a stable `serviceFQDN`),
 and a PersistentVolume when a workspace is requested. Idle terminals are
