@@ -49,6 +49,11 @@ _DNS_SAFE = re.compile(r"[^a-z0-9-]")
 _PLURAL_SANDBOX = "sandboxes"
 _API_KEY_ENV = "OPEN_TERMINAL_API_KEY"
 _CONTAINER_NAME = "open-terminal"
+_MANAGED_BY = "app.kubernetes.io/managed-by=terminals"
+# Exact identity for reconcile(); the Sandbox name is a hash and label values
+# are charset-limited, so the un-mangled user/policy ids live in annotations.
+_ANN_USER_ID = "openwebui.com/user-id"
+_ANN_POLICY_ID = "openwebui.com/policy-id"
 
 
 def _policy_slug(policy_id: str) -> str:
@@ -204,6 +209,10 @@ class KubernetesSandboxBackend(Backend):
                 "name": _sandbox_name(user_id, policy_id),
                 "namespace": self._ns,
                 "labels": _labels(user_id, policy_id),
+                "annotations": {
+                    _ANN_USER_ID: user_id,
+                    _ANN_POLICY_ID: policy_id,
+                },
             },
             "spec": {
                 "service": True,  # headless Service → stable serviceFQDN
@@ -336,10 +345,20 @@ class KubernetesSandboxBackend(Backend):
     async def _wait_until_ready(
         self, name: str, timeout: int = 120
     ) -> Optional[dict]:
-        """Poll the Sandbox until it is Running with a connectable endpoint."""
+        """Poll the Sandbox until it is Running with a connectable endpoint.
+
+        Transient API errors (anything other than the 404 that ``_get_sandbox``
+        maps to ``None``) are logged and retried until the deadline — a single
+        API-server blip during the wait must not fail the whole provision.
+        """
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
-            sandbox = await self._get_sandbox(name)
+            try:
+                sandbox = await self._get_sandbox(name)
+            except client.exceptions.ApiException as e:
+                log.warning("Transient error polling Sandbox %s: %s", name, e)
+                await asyncio.sleep(2)
+                continue
             if sandbox is None:
                 return None
             if self._sandbox_running(sandbox):
@@ -406,6 +425,51 @@ class KubernetesSandboxBackend(Backend):
         if self._api_client is not None:
             await self._api_client.close()
             self._api_client = None
+
+    async def reconcile(self) -> None:
+        """Rebuild in-memory tracking from live Sandboxes after a restart.
+
+        Called once on startup (``main.py``).  The idle reaper only scans
+        in-memory state, so without this any Sandbox left ``Running`` before a
+        restart would never be suspended — it would keep running until a user
+        happened to reconnect.  We list our managed Sandboxes, skip the ones
+        already suspended, and re-track the rest so the reaper can suspend them
+        when idle.  Per-policy idle timeouts aren't persisted, so adopted
+        sandboxes fall back to ``settings.idle_timeout_minutes``.
+        """
+        custom = await self._custom()
+        try:
+            resp = await custom.list_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=self._ns,
+                plural=_PLURAL_SANDBOX,
+                label_selector=_MANAGED_BY,
+            )
+        except client.exceptions.ApiException as e:
+            log.warning("reconcile: could not list Sandboxes: %s", e)
+            return
+
+        adopted = 0
+        for sandbox in resp.get("items", []):
+            if self._is_suspended(sandbox):
+                continue  # already scaled to zero — nothing to reap
+            ann = (sandbox.get("metadata") or {}).get("annotations") or {}
+            user_id = ann.get(_ANN_USER_ID)
+            if not user_id:
+                continue  # not created by this backend / pre-annotation object
+            info = self._connection_info(sandbox)
+            if info is None:
+                continue  # no endpoint yet — a later request will track it
+            policy_id = ann.get(_ANN_POLICY_ID, "default")
+            self._track(self._key(user_id, policy_id), info, None)
+            adopted += 1
+
+        if adopted:
+            log.info(
+                "reconcile: adopted %d running sandbox(es) for idle reaping",
+                adopted,
+            )
 
     # ------------------------------------------------------------------
     # Sandbox-aware ensure_terminal (get-or-create, resume if suspended)
