@@ -25,15 +25,18 @@ metadata:
   name: terminals-sandbox
   namespace: terminals
 rules:
-  # Core Sandbox resource: create/delete per user, patch replicas for
-  # suspend/resume, and read status (serviceFQDN, Ready condition).
+  # Sandbox resource, exactly the verbs the backend uses:
+  #   get    - read a sandbox and its status (serviceFQDN, Ready condition)
+  #   list   - reconcile() re-adopts running sandboxes after a restart
+  #   create - provision one sandbox per user+policy
+  #   patch  - suspend/resume via spec.operatingMode
+  #   delete - teardown
+  # Status is read through GET on the resource, so no sandboxes/status
+  # subresource is needed, and the backend never talks to the Services/Pods
+  # the controller creates (endpoint info comes off the Sandbox status).
   - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes", "sandboxes/status"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Read-only access to the Services/Pods the controller creates.
-  - apiGroups: [""]
-    resources: ["services", "pods"]
-    verbs: ["get", "list", "watch"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
