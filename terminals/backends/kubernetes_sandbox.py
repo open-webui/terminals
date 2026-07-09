@@ -129,7 +129,13 @@ class KubernetesSandboxBackend(Backend):
     # Manifest builders
     # ------------------------------------------------------------------
 
-    def _build_pod_template(self, spec: dict, api_key: str) -> dict:
+    def _build_pod_template(
+        self,
+        spec: dict,
+        api_key: str,
+        user_id: str = "",
+        policy_id: str = "default",
+    ) -> dict:
         """Build the Sandbox ``podTemplate`` from a policy spec + per-user key."""
         image = spec.get("image", settings.kubernetes_image)
         port = settings.sandbox_port
@@ -159,7 +165,10 @@ class KubernetesSandboxBackend(Backend):
             },
         }
 
-        requests = {"cpu": "100m", "memory": "256Mi"}
+        requests = {
+            "cpu": spec.get("cpu_request") or settings.sandbox_cpu_request,
+            "memory": spec.get("memory_request") or settings.sandbox_memory_request,
+        }
         limits = {}
         if spec.get("cpu_limit"):
             limits["cpu"] = spec["cpu_limit"]
@@ -183,7 +192,12 @@ class KubernetesSandboxBackend(Backend):
         if settings.sandbox_runtime_class:
             pod_spec["runtimeClassName"] = settings.sandbox_runtime_class
 
-        return {"spec": pod_spec}
+        # Propagate the app labels onto the Pods the controller creates so
+        # label selectors / NetworkPolicies can target them.
+        return {
+            "metadata": {"labels": _labels(user_id, policy_id)},
+            "spec": pod_spec,
+        }
 
     def _build_volume_claim_templates(self, spec: dict) -> list[dict]:
         """Build ``volumeClaimTemplates`` (empty when storage is ephemeral)."""
@@ -216,7 +230,9 @@ class KubernetesSandboxBackend(Backend):
             },
             "spec": {
                 "service": True,  # headless Service → stable serviceFQDN
-                "podTemplate": self._build_pod_template(spec, api_key),
+                "podTemplate": self._build_pod_template(
+                    spec, api_key, user_id, policy_id
+                ),
             },
         }
         vct = self._build_volume_claim_templates(spec)

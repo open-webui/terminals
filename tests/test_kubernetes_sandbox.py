@@ -183,6 +183,29 @@ def test_pod_template_runtime_class(monkeypatch):
     assert pod["runtimeClassName"] == "gvisor"
 
 
+def test_pod_template_carries_app_labels():
+    # #11 — controller-created Pods must inherit the app labels for selectors.
+    pt = B._build_pod_template({}, "k", "u1", "team-a")
+    labels = pt["metadata"]["labels"]
+    assert labels["app.kubernetes.io/managed-by"] == "terminals"
+    assert labels["openwebui.com/user-id"] == "u1"
+
+
+def test_pod_template_requests_default_from_settings(monkeypatch):
+    # #10 — deployment-wide default requests are configurable.
+    monkeypatch.setattr(ks.settings, "sandbox_cpu_request", "250m")
+    monkeypatch.setattr(ks.settings, "sandbox_memory_request", "512Mi")
+    c = B._build_pod_template({}, "k")["spec"]["containers"][0]
+    assert c["resources"]["requests"] == {"cpu": "250m", "memory": "512Mi"}
+
+
+def test_pod_template_requests_overridden_by_spec():
+    # #10 — per-policy spec overrides the defaults.
+    spec = {"cpu_request": "500m", "memory_request": "1Gi"}
+    c = B._build_pod_template(spec, "k")["spec"]["containers"][0]
+    assert c["resources"]["requests"] == {"cpu": "500m", "memory": "1Gi"}
+
+
 # ---------------------------------------------------------------------------
 # _build_volume_claim_templates
 # ---------------------------------------------------------------------------

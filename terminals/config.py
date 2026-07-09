@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     sandbox_version: str = "v1beta1"             # agent-sandbox API version (v0.5.0+)
     sandbox_port: int = 8000                     # open-terminal container port
     sandbox_runtime_class: str = ""              # e.g. "gvisor" or "kata-qemu" for isolation
+    sandbox_cpu_request: str = "100m"            # default CPU request (per-policy spec overrides)
+    sandbox_memory_request: str = "256Mi"        # default memory request (per-policy spec overrides)
 
     # Idle reaper — tear down terminals after N minutes of inactivity (0 = disabled)
     idle_timeout_minutes: int = 0
