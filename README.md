@@ -1,8 +1,5 @@
 # Terminals
 
-> [!NOTE]
-> This project is **actively under development**. APIs, configuration, and behavior may change between releases.
-
 Per-user [Open Terminal](https://github.com/open-webui/open-terminal) orchestration for Docker and Kubernetes.
 
 Terminals gives every Open WebUI user their own isolated container, with separate credentials, resource limits, and network rules. It handles the full lifecycle automatically: spinning up containers when a user connects, proxying traffic, enforcing limits, and cleaning up when they're done.
@@ -107,6 +104,7 @@ curl -X POST http://localhost:3000/p/data-science/execute \
 | `restricted` | bool | Enable restricted Kubernetes/OpenShift pod defaults for this policy |
 | `pod_security_context` | dict | Pod security context override for Kubernetes backends |
 | `container_security_context` | dict | Container security context override for Kubernetes backends |
+
 > [!NOTE]
 > **Storage limits are fully enforced only on the Kubernetes backends** (via sized PVCs). On the `docker` backend, `storage` (and `TERMINALS_MAX_STORAGE`) caps the container's *writable layer* via Docker's `StorageOpt`, which requires a storage driver that supports it (e.g. overlay2 on XFS with the `pquota` mount option). On unsupported drivers such as overlay2-on-ext4, Terminals logs a warning and provisions without the limit. The persistent `/home/user` directory is bind-mounted from the host and is **not** quota-limited on Docker. Use a Kubernetes backend if you need hard per-user storage caps.
 
