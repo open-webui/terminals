@@ -163,6 +163,8 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_KUBERNETES_RESTRICTED` | `false` | Enable restricted Kubernetes/OpenShift pod defaults globally |
 | `TERMINALS_KUBERNETES_POD_SECURITY_CONTEXT` | | JSON pod security context merged into Kubernetes terminal pods |
 | `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into Kubernetes terminal containers |
+| `TERMINALS_KUBERNETES_NODE_SELECTOR` | | Node selector for Kubernetes terminal and reset pods, as JSON or `k=v,k2=v2` |
+| `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of Kubernetes tolerations for terminal and reset pods |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 

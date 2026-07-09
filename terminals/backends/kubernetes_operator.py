@@ -26,6 +26,7 @@ from terminals.utils.kubernetes_security import (
     pod_security_context,
     restricted_enabled,
 )
+from terminals.utils.kubernetes_scheduling import node_selector, tolerations
 
 log = logging.getLogger(__name__)
 
@@ -471,6 +472,8 @@ class KubernetesOperatorBackend(Backend):
                         ),
                     )
                 ],
+                node_selector=node_selector(),
+                tolerations=tolerations(),
             ),
         )
 

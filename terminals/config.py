@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     kubernetes_restricted: bool = False        # OpenShift/restricted pod mode
     kubernetes_pod_security_context: dict[str, Any] = Field(default_factory=dict)
     kubernetes_container_security_context: dict[str, Any] = Field(default_factory=dict)
+    kubernetes_node_selector: str = ""         # JSON object or "k=v,k2=v2"
+    kubernetes_tolerations: str = ""           # JSON array of Kubernetes tolerations
 
     # Operator-specific settings
     kubernetes_crd_group: str = "openwebui.com"

@@ -20,6 +20,7 @@ from terminals.utils.kubernetes_security import (
     pod_security_context,
     restricted_enabled,
 )
+from terminals.utils.kubernetes_scheduling import node_selector, tolerations
 
 log = logging.getLogger(__name__)
 
@@ -270,6 +271,8 @@ class KubernetesBackend(Backend):
                 ],
                 volumes=volumes or None,
                 affinity=affinity,
+                node_selector=node_selector(),
+                tolerations=tolerations(),
                 restart_policy="Always",
                 security_context=pod_security or None,
             ),
@@ -451,6 +454,8 @@ class KubernetesBackend(Backend):
                         ),
                     )
                 ],
+                node_selector=node_selector(),
+                tolerations=tolerations(),
             ),
         )
 

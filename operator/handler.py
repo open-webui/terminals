@@ -15,6 +15,7 @@ Ported from the ``kubernetes-controller`` branch with the ABC-compatible
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -229,6 +230,37 @@ def _set_condition(
     return conditions
 
 
+def _parse_node_selector() -> dict[str, str] | None:
+    raw = os.environ.get("TERMINALS_KUBERNETES_NODE_SELECTOR", "").strip()
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("TERMINALS_KUBERNETES_NODE_SELECTOR must be an object")
+        return {str(key): str(value) for key, value in data.items()}
+
+    selector = {}
+    for pair in raw.split(","):
+        if "=" not in pair:
+            raise ValueError(
+                "TERMINALS_KUBERNETES_NODE_SELECTOR must be JSON or k=v pairs"
+            )
+        key, value = pair.split("=", 1)
+        selector[key.strip()] = value.strip()
+    return selector or None
+
+
+def _parse_tolerations() -> list[dict] | None:
+    raw = os.environ.get("TERMINALS_KUBERNETES_TOLERATIONS", "").strip()
+    if not raw:
+        return None
+    data = json.loads(raw)
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise ValueError("TERMINALS_KUBERNETES_TOLERATIONS must be a JSON array")
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Manifest builders
 # ---------------------------------------------------------------------------
@@ -318,6 +350,12 @@ def _build_pod_manifest(
         "enableServiceLinks": False,
         "automountServiceAccountToken": False,
     }
+    node_selector = _parse_node_selector()
+    if node_selector:
+        pod_spec["nodeSelector"] = node_selector
+    tolerations = _parse_tolerations()
+    if tolerations:
+        pod_spec["tolerations"] = tolerations
     pod_security_context = _deep_merge(
         RESTRICTED_POD_SECURITY_CONTEXT if restricted else {},
         spec.get("podSecurityContext"),
