@@ -55,10 +55,19 @@ _MANAGED_BY = "app.kubernetes.io/managed-by=terminals"
 _ANN_USER_ID = "openwebui.com/user-id"
 _ANN_POLICY_ID = "openwebui.com/policy-id"
 
+# How long ensure_terminal() trusts tracked connection info before re-checking
+# the API server (it runs on every proxied request).
+_VERIFY_TTL_SECONDS = 10.0
+
 
 def _policy_slug(policy_id: str) -> str:
     """DNS-safe slug for a policy id."""
     return _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20] or "default"
+
+
+def _user_hash(user_id: str) -> str:
+    """Short, label/DNS-safe digest of a user id."""
+    return hashlib.sha256(user_id.encode()).hexdigest()[:12]
 
 
 def _sandbox_name(user_id: str, policy_id: str = "default") -> str:
@@ -67,7 +76,7 @@ def _sandbox_name(user_id: str, policy_id: str = "default") -> str:
     Mirrors the previous operator backend's scheme so names stay stable and
     within the 63-character DNS label limit.
     """
-    short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+    short = _user_hash(user_id)
     if policy_id == "default":
         return f"term-{short}"
     return f"term-{short}-{_policy_slug(policy_id)}"
@@ -86,7 +95,8 @@ def _labels(user_id: str = "", policy_id: str = "default") -> dict[str, str]:
         "openwebui.com/policy": _policy_slug(policy_id),
     }
     if user_id:
-        labels["openwebui.com/user-id"] = user_id
+        # Hashed: raw user ids (from request headers) may not be label-safe.
+        labels["openwebui.com/user-id"] = _user_hash(user_id)
     return labels
 
 
@@ -96,6 +106,7 @@ class KubernetesSandboxBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
+        self._verified_at: dict[str, float] = {}  # key → last API verification
 
     # ------------------------------------------------------------------
     # Client / config plumbing
@@ -399,8 +410,13 @@ class KubernetesSandboxBackend(Backend):
         spec = spec or {}
         api_key = _generate_api_key()
         body = self._build_sandbox(user_id, policy_id, spec, api_key)
-        await self._create_sandbox(body)
-        return await self._wait_until_ready(_sandbox_name(user_id, policy_id))
+        name = _sandbox_name(user_id, policy_id)
+        sandbox = await self._create_sandbox(body)
+        # A 409 hands back a pre-existing Sandbox; resume it if Suspended,
+        # otherwise the readiness wait below can never succeed.
+        if sandbox is not None and self._is_suspended(sandbox):
+            await self._set_operating_mode(name, "Running")
+        return await self._wait_until_ready(name)
 
     async def start(self, instance_id: str) -> bool:
         """Resume a suspended sandbox; idempotent if already running."""
@@ -500,8 +516,28 @@ class KubernetesSandboxBackend(Backend):
         key = self._key(user_id, policy_id)
         name = _sandbox_name(user_id, policy_id)
 
-        # Fast path — sandbox exists and is Running.
-        sandbox = await self._get_sandbox(name)
+        # Fast path — serve tracked instances from cache within the verify TTL.
+        cached = self._instances.get(key)
+        if cached is not None:
+            if (
+                time.monotonic() - self._verified_at.get(key, 0.0)
+                < _VERIFY_TTL_SECONDS
+            ):
+                self._activity[key] = time.monotonic()
+                return cached
+            try:
+                sandbox = await self._get_sandbox(name)
+            except client.exceptions.ApiException as e:
+                log.warning(
+                    "Transient error verifying Sandbox %s; using cached info: %s",
+                    name,
+                    e,
+                )
+                self._activity[key] = time.monotonic()
+                return cached
+        else:
+            sandbox = await self._get_sandbox(name)
+
         if sandbox is not None and self._sandbox_running(sandbox):
             info = self._connection_info(sandbox)
             if info:
@@ -528,21 +564,17 @@ class KubernetesSandboxBackend(Backend):
             return info
 
     def _track(self, key: str, info: dict, spec: Optional[dict]) -> None:
+        now = time.monotonic()
         self._instances[key] = info
         self._specs[key] = spec or {}
-        self._activity[key] = time.monotonic()
+        self._activity[key] = now
+        self._verified_at[key] = now
 
     async def get_terminal_info(self, user_id: str) -> Optional[dict]:
         sandbox = await self._get_sandbox(_sandbox_name(user_id))
         if sandbox is None or not self._sandbox_running(sandbox):
             return None
         return self._connection_info(sandbox)
-
-    async def touch_activity(
-        self, user_id: str, policy_id: str = "default"
-    ) -> None:
-        # Activity is tracked in-memory; the idle reaper suspends idle sandboxes.
-        self._activity[self._key(user_id, policy_id)] = time.monotonic()
 
     # ------------------------------------------------------------------
     # Idle reaper — suspend (operatingMode Suspended) instead of tear down
@@ -573,4 +605,5 @@ class KubernetesSandboxBackend(Backend):
             self._instances.pop(key, None)
             self._specs.pop(key, None)
             self._activity.pop(key, None)
+            self._verified_at.pop(key, None)
             self._locks.pop(key, None)

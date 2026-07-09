@@ -21,6 +21,7 @@ from terminals.backends.kubernetes_sandbox import (
     _labels,
     _policy_slug,
     _sandbox_name,
+    _user_hash,
 )
 
 # A shared instance for calling the *pure* builder/parsing methods (no client).
@@ -37,12 +38,16 @@ class FakeCustom:
     entries that are Exceptions are raised, dicts are returned.
     """
 
-    def __init__(self, get_seq=None, list_result=None, list_exc=None):
+    def __init__(self, get_seq=None, list_result=None, list_exc=None, create_exc=None):
         self._get_seq = list(get_seq or [])
         self.get_calls = 0
         self._list_result = list_result if list_result is not None else {"items": []}
         self._list_exc = list_exc
         self.list_calls = 0
+        self._create_exc = create_exc
+        self.created = []
+        self.patched = []
+        self.deleted = []
 
     async def get_namespaced_custom_object(self, **kw):
         self.get_calls += 1
@@ -56,6 +61,20 @@ class FakeCustom:
         if self._list_exc:
             raise self._list_exc
         return self._list_result
+
+    async def create_namespaced_custom_object(self, body=None, **kw):
+        self.created.append(body)
+        if self._create_exc:
+            raise self._create_exc
+        return body
+
+    async def patch_namespaced_custom_object(self, name=None, body=None, **kw):
+        self.patched.append((name, body))
+        return body
+
+    async def delete_namespaced_custom_object(self, name=None, **kw):
+        self.deleted.append(name)
+        return {}
 
 
 def patch_custom(backend, fake):
@@ -136,8 +155,15 @@ def test_sandbox_name_is_deterministic_and_dns_bounded():
 def test_labels_include_manager_and_optional_user():
     lbl = _labels("u1", "default")
     assert lbl["app.kubernetes.io/managed-by"] == "terminals"
-    assert lbl["openwebui.com/user-id"] == "u1"
+    assert lbl["openwebui.com/user-id"] == _user_hash("u1")
     assert "openwebui.com/user-id" not in _labels("", "default")
+
+
+def test_labels_user_id_hashed_to_label_safe_value():
+    # Raw ids from request headers ('@', spaces, length) are not label-safe.
+    val = _labels("someone@example.com" * 5, "default")["openwebui.com/user-id"]
+    assert len(val) <= 63
+    assert all(c.isalnum() or c in "-_." for c in val)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +214,7 @@ def test_pod_template_carries_app_labels():
     pt = B._build_pod_template({}, "k", "u1", "team-a")
     labels = pt["metadata"]["labels"]
     assert labels["app.kubernetes.io/managed-by"] == "terminals"
-    assert labels["openwebui.com/user-id"] == "u1"
+    assert labels["openwebui.com/user-id"] == _user_hash("u1")
 
 
 def test_pod_template_requests_default_from_settings(monkeypatch):
@@ -414,3 +440,137 @@ async def test_reconcile_handles_list_error_gracefully():
     patch_custom(b, FakeCustom(list_exc=ApiException(status=500, reason="boom")))
     await b.reconcile()                     # must not raise
     assert b._instances == {}
+
+
+# ---------------------------------------------------------------------------
+# ensure_terminal: get-or-create, resume, fast-path cache
+# ---------------------------------------------------------------------------
+async def test_ensure_terminal_provisions_when_missing(no_sleep):
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom(get_seq=[
+        ApiException(status=404, reason="nf"),   # fast path
+        ApiException(status=404, reason="nf"),   # re-check under lock
+        make_sandbox(user_id="u1"),              # readiness poll
+    ])
+    patch_custom(b, fake)
+    info = await b.ensure_terminal("u1")
+    assert info and info["instance_id"] == _sandbox_name("u1")
+    assert len(fake.created) == 1
+    assert fake.created[0]["metadata"]["name"] == _sandbox_name("u1")
+    assert b._key("u1", "default") in b._instances
+
+
+async def test_ensure_terminal_resumes_suspended(no_sleep):
+    b = KubernetesSandboxBackend()
+    suspended = make_sandbox(user_id="u1", suspended=True)
+    fake = FakeCustom(get_seq=[suspended, suspended, make_sandbox(user_id="u1")])
+    patch_custom(b, fake)
+    info = await b.ensure_terminal("u1")
+    assert info is not None
+    assert fake.patched == [
+        (_sandbox_name("u1"), {"spec": {"operatingMode": "Running"}})
+    ]
+    assert fake.created == []               # resumed, not re-provisioned
+
+
+async def test_ensure_terminal_serves_cache_within_ttl():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom()
+    patch_custom(b, fake)
+    key = b._key("u1", "default")
+    cached = {"instance_id": _sandbox_name("u1"), "host": "h", "port": 1, "api_key": "k"}
+    b._track(key, cached, {})
+    assert await b.ensure_terminal("u1") == cached
+    assert fake.get_calls == 0              # no API round-trip within the TTL
+
+
+async def test_ensure_terminal_reverifies_after_ttl():
+    b = KubernetesSandboxBackend()
+    sb = make_sandbox(user_id="u1")
+    fake = FakeCustom(get_seq=[sb])
+    patch_custom(b, fake)
+    key = b._key("u1", "default")
+    b._track(key, {"instance_id": _sandbox_name("u1")}, {})
+    b._verified_at[key] = 0.0               # expire the TTL
+    info = await b.ensure_terminal("u1")
+    assert fake.get_calls == 1
+    assert info["host"] == "term.ns.svc"    # refreshed from the live object
+
+
+async def test_ensure_terminal_uses_cache_on_transient_error():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom(get_seq=[ApiException(status=503, reason="unavailable")])
+    patch_custom(b, fake)
+    key = b._key("u1", "default")
+    cached = {"instance_id": _sandbox_name("u1"), "host": "h", "port": 1, "api_key": "k"}
+    b._track(key, cached, {})
+    b._verified_at[key] = 0.0               # force re-verify -> API error
+    assert await b.ensure_terminal("u1") == cached
+
+
+# ---------------------------------------------------------------------------
+# provision / start / teardown / _reap_idle
+# ---------------------------------------------------------------------------
+async def test_provision_resumes_suspended_on_conflict(no_sleep):
+    # 409 hands back a Suspended sandbox -> must resume, not wait out the timeout.
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom(
+        create_exc=ApiException(status=409, reason="conflict"),
+        get_seq=[make_sandbox(user_id="u1", suspended=True), make_sandbox(user_id="u1")],
+    )
+    patch_custom(b, fake)
+    info = await b.provision("u1")
+    assert info is not None
+    assert fake.patched == [
+        (_sandbox_name("u1"), {"spec": {"operatingMode": "Running"}})
+    ]
+
+
+async def test_start_resumes_suspended_and_is_idempotent():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom(get_seq=[make_sandbox(user_id="u1", suspended=True)])
+    patch_custom(b, fake)
+    assert await b.start(_sandbox_name("u1")) is True
+    assert len(fake.patched) == 1
+
+    fake2 = FakeCustom(get_seq=[make_sandbox(user_id="u1")])
+    patch_custom(b, fake2)
+    assert await b.start(_sandbox_name("u1")) is True
+    assert fake2.patched == []              # already running -> no patch
+
+    fake3 = FakeCustom(get_seq=[ApiException(status=404, reason="nf")])
+    patch_custom(b, fake3)
+    assert await b.start(_sandbox_name("u1")) is False
+
+
+async def test_teardown_deletes_sandbox():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom()
+    patch_custom(b, fake)
+    await b.teardown("term-x")
+    assert fake.deleted == ["term-x"]
+
+
+async def test_reap_idle_suspends_and_untracks():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom()
+    patch_custom(b, fake)
+    key = b._key("u1", "default")
+    b._track(key, {"instance_id": "term-x", "instance_name": "term-x"}, {"idle_timeout_minutes": 1})
+    b._activity[key] -= 120                 # idle past the 1-minute timeout
+    await b._reap_idle()
+    assert fake.patched == [("term-x", {"spec": {"operatingMode": "Suspended"}})]
+    assert key not in b._instances
+    assert key not in b._verified_at
+    assert fake.deleted == []               # suspended, never deleted
+
+
+async def test_reap_idle_keeps_active_instances():
+    b = KubernetesSandboxBackend()
+    fake = FakeCustom()
+    patch_custom(b, fake)
+    key = b._key("u1", "default")
+    b._track(key, {"instance_id": "term-x"}, {"idle_timeout_minutes": 1})
+    await b._reap_idle()                    # just active -> untouched
+    assert fake.patched == []
+    assert key in b._instances
