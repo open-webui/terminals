@@ -38,3 +38,9 @@ include = [
     "terminals/migrations/**/*",
     "terminals/frontend/build/**/*",
 ]
+# The frontend build output is gitignored, and hatchling excludes
+# VCS-ignored files even when they match `include`. `artifacts` is the
+# override that actually ships them in the wheel.
+artifacts = [
+    "terminals/frontend/build/**/*",
+]
