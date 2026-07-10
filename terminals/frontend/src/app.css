@@ -22,8 +22,8 @@
 }
 
 :root {
-	--app-bg: #ffffff;
-	--app-fg: #525252;
+	--app-bg: #050505;
+	--app-fg: #c8c8c8;
 	--app-fg-muted: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
 	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 48%, var(--app-bg));
 	--app-border: color-mix(in oklab, var(--app-fg) 10%, transparent);
@@ -48,6 +48,7 @@
 		background: var(--app-bg);
 		color: var(--app-fg);
 		font-family: var(--font-sans);
+		color-scheme: dark;
 	}
 
 	button {

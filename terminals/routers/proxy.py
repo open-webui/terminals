@@ -318,6 +318,12 @@ _POLICY_CACHE_TTL = 60  # seconds
 _policy_cache: dict[str, tuple[float, tuple[str, dict | None]]] = {}
 
 
+def invalidate_policy_caches(policy_id: str) -> None:
+    """Discard cached policy data and tool specs after a policy change."""
+    _policy_cache.pop(policy_id, None)
+    _spec_cache.pop(policy_id, None)
+
+
 async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
     """Look up a policy by ID (cached for 60s). Returns (policy_id, merged spec)."""
     now = time.monotonic()
@@ -579,4 +585,3 @@ async def ws_policy_terminal_proxy(
         return
 
     await _ws_proxy_handler(ws, session_id, effective_user, policy_id=_id, spec=spec)
-
