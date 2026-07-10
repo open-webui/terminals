@@ -88,14 +88,10 @@
 			]);
 			const policiesWithLifecycle = await Promise.all(
 				nextPolicies.map(async (policy) => {
-					try {
-						const lifecycle = await api<{ data?: Record<string, any> }>(
-							`/api/v1/policies/${encodeURIComponent(policy.id)}/lifecycle`
-						);
-						return { ...policy, lifecycle: lifecycle.data || {} };
-					} catch {
-						return { ...policy, lifecycle: {} };
-					}
+					const lifecycle = await api<{ data?: Record<string, any> }>(
+						`/api/v1/policies/${encodeURIComponent(policy.id)}/lifecycle`
+					);
+					return { ...policy, lifecycle: lifecycle.data || {} };
 				})
 			);
 			status = nextStatus;
@@ -257,32 +253,41 @@
 	<title>Terminals</title>
 </svelte:head>
 
-<div class="min-h-dvh bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-50">
-	<div class="grid min-h-dvh grid-cols-1 md:grid-cols-[210px_minmax(0,1fr)]">
-		<aside class="hidden border-r border-gray-200 px-3.5 py-5 dark:border-white/10 md:block">
-			<div class="mb-8 flex h-8 items-center gap-2 text-sm font-medium">
-				<span class="font-mono text-[22px] leading-none">&gt;_</span>
+
+
+
+<div class="app-theme min-h-dvh bg-white font-sans antialiased text-gray-700">
+	<div class="grid min-h-dvh grid-cols-1 md:grid-cols-[16.5rem_minmax(0,1fr)]">
+		<aside class="hidden border-r border-gray-200 bg-gray-50/50 px-1.5 py-1.5 md:block">
+			<div class="mb-1 flex h-7 items-center gap-1.5 px-2 text-xs font-medium text-gray-900">
+				<span class="flex h-3.5 w-3.5 items-center justify-center rounded-[3px] bg-gray-900 text-[8px] text-white">▣</span>
 				<span>Terminals</span>
 			</div>
-			<nav class="space-y-0.5 text-[13px]">
-				<a class="block rounded-lg bg-gray-100 px-2.5 py-2 text-gray-900 dark:bg-white/8 dark:text-white" href="#terminals">Terminals</a>
-				<a class="block rounded-lg px-2.5 py-2 text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-500 dark:hover:bg-white/8 dark:hover:text-white" href="#policies">Policies</a>
+			<div class="mb-1 h-px bg-gray-200"></div>
+			<nav class="space-y-px text-xs">
+				<a class="block h-7 rounded-md bg-gray-200/70 px-2 leading-7 font-medium text-gray-900" href="#terminals">Terminals</a>
+				<a class="block h-7 rounded-md px-2 leading-7 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700" href="#policies">Policies</a>
 			</nav>
 		</aside>
 
-		<main class="min-w-0 px-4 py-6 sm:px-8 sm:py-9 lg:px-11">
-			<div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-				<h1 class="text-lg font-medium tracking-normal">Terminals</h1>
-				<div class="flex min-w-0 items-center gap-2 sm:w-[420px]">
+		<main class="min-w-0">
+			<div class="flex h-9 items-center px-3">
+				<h1 class="px-0.5 text-xs font-medium text-gray-700">Terminals</h1>
+				<div class="ml-4 flex items-center gap-3 text-[11px] text-gray-500">
+					<span>{status?.backend ?? '-'}</span>
+					<span>{status?.active_terminals ?? terminals.length} active</span>
+					<span>{status?.policy_count ?? policies.length} policies</span>
+				</div>
+				<div class="ml-auto flex min-w-0 items-center gap-1.5">
 					<input
-						class="h-8 min-w-0 flex-1 rounded-lg border border-gray-200 bg-gray-50 px-2.5 text-xs outline-none transition focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25"
+						class="h-6 w-40 min-w-0 border-0 bg-transparent px-1.5 text-xs text-gray-700 outline-none placeholder:text-gray-400 focus:bg-gray-100 sm:w-52"
 						type="password"
-						placeholder="Admin API key"
+						placeholder="Admin key"
 						value={token}
 						oninput={(event) => saveToken(event.currentTarget.value)}
 					/>
 					<button
-						class="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-500 dark:hover:bg-white/8 dark:hover:text-white"
+						class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
 						type="button"
 						aria-label="Refresh"
 						title="Refresh"
@@ -299,57 +304,45 @@
 				</div>
 			</div>
 
-			<div class="mb-8 grid grid-cols-2 border-y border-gray-200 dark:border-white/10 lg:grid-cols-4">
-				<div class="flex min-h-14 items-center gap-2 border-r border-gray-200 px-3 text-[13px] text-gray-500 dark:border-white/10 dark:text-gray-500">
-					Health <span class="h-1.5 w-1.5 rounded-full bg-emerald-600"></span>
-					<strong class="ml-auto font-medium text-gray-900 dark:text-white">{status?.status ? 'Healthy' : 'Unknown'}</strong>
-				</div>
-				<div class="flex min-h-14 items-center gap-2 px-3 text-[13px] text-gray-500 dark:text-gray-500 lg:border-r lg:border-gray-200 lg:dark:border-white/10">
-					Backend <strong class="ml-auto truncate font-medium text-gray-900 dark:text-white">{status?.backend ?? '-'}</strong>
-				</div>
-				<div class="flex min-h-14 items-center gap-2 border-r border-t border-gray-200 px-3 text-[13px] text-gray-500 dark:border-white/10 dark:text-gray-500 lg:border-t-0">
-					Active <strong class="ml-auto font-medium text-gray-900 dark:text-white">{status?.active_terminals ?? terminals.length}</strong>
-				</div>
-				<div class="flex min-h-14 items-center gap-2 border-t border-gray-200 px-3 text-[13px] text-gray-500 dark:border-white/10 dark:text-gray-500 lg:border-t-0">
-					Policies <strong class="ml-auto font-medium text-gray-900 dark:text-white">{status?.policy_count ?? policies.length}</strong>
-				</div>
-			</div>
-
-			<section id="terminals" class="mb-10">
-				<div class="mb-2 flex items-center justify-between">
-					<h2 class="text-[17px] font-medium">Active terminals</h2>
+			<section id="terminals" class="pt-3">
+				<div class="flex h-7 items-center justify-between px-3">
+					<h2 class="text-xs text-gray-500">Active terminals</h2>
 				</div>
 				{#if terminals.length === 0}
-					<div class="border-t border-gray-200 py-7 text-[13px] text-gray-400 dark:border-white/10 dark:text-gray-600">No active terminals.</div>
+					<div class="px-3 py-4 text-xs text-gray-400">No active terminals.</div>
 				{:else}
 					<div class="overflow-x-auto">
-						<table class="w-full table-fixed border-collapse text-[13px]">
-							<thead class="text-left text-xs font-medium text-gray-500 dark:text-gray-500">
-								<tr class="border-y border-gray-200 dark:border-white/10">
-									<th class="h-9 px-1 font-medium">User</th>
-									<th class="h-9 px-1 font-medium">Policy</th>
-									<th class="h-9 px-1 font-medium">Status</th>
-									<th class="h-9 px-1 font-medium">Last active</th>
-									<th class="h-9 px-1 font-medium">Instance</th>
-									<th class="h-9 w-14 px-1"></th>
+						<table class="w-full table-fixed border-collapse text-xs">
+							<thead class="text-left text-[11px] font-normal text-gray-500">
+								<tr>
+									<th class="h-7 w-[30%] px-3 font-normal">User</th>
+									<th class="h-7 w-[30%] px-2 font-normal">Policy</th>
+									<th class="h-7 px-2 font-normal">Status</th>
+									<th class="hidden h-7 px-2 font-normal sm:table-cell">Last active</th>
+									<th class="hidden h-7 px-2 font-normal lg:table-cell">Instance</th>
+									<th class="h-7 w-8 px-1"></th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each terminals as terminal}
-									<tr class="border-b border-gray-200 dark:border-white/10">
-										<td class="h-11 truncate px-1">{terminal.user_id}</td>
-										<td class="h-11 truncate px-1">{terminal.policy_id}</td>
-										<td class="h-11 truncate px-1">
+									<tr class="text-gray-700 hover:bg-gray-50">
+										<td class="h-7 truncate px-3">{terminal.user_id}</td>
+										<td class="h-7 truncate px-2">
+											{policies.some((policy) => policy.id === terminal.policy_id)
+												? terminal.policy_id
+												: 'Service defaults'}
+										</td>
+										<td class="h-7 truncate px-2">
 											<span class="inline-flex items-center gap-2">
 												<span class={`h-1.5 w-1.5 rounded-full ${statusClass(terminal.status)}`}></span>
 												{terminal.status}
 											</span>
 										</td>
-										<td class="h-11 truncate px-1">{lastActive(terminal.last_active_at)}</td>
-										<td class="h-11 truncate px-1">{terminal.instance_name || terminal.instance_id}</td>
-										<td class="h-11 px-1 text-right">
+										<td class="hidden h-7 truncate px-2 sm:table-cell">{lastActive(terminal.last_active_at)}</td>
+										<td class="hidden h-7 truncate px-2 lg:table-cell">{terminal.instance_name || terminal.instance_id}</td>
+										<td class="h-7 px-1 text-right">
 											<button
-												class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white"
+												class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
 												type="button"
 												aria-label="Stop"
 												title="Stop"
@@ -366,11 +359,11 @@
 				{/if}
 			</section>
 
-			<section id="policies">
-				<div class="mb-2 flex items-center justify-between">
-					<h2 class="text-[17px] font-medium">Policies</h2>
+			<section id="policies" class="mt-5">
+				<div class="flex h-7 items-center justify-between px-3">
+					<h2 class="text-xs text-gray-500">Policies</h2>
 					<button
-						class="flex h-7 w-7 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-500 dark:hover:bg-white/8 dark:hover:text-white"
+					class="flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
 						type="button"
 						aria-label="Add policy"
 						title="Add policy"
@@ -380,42 +373,44 @@
 					</button>
 				</div>
 				{#if policies.length === 0}
-					<div class="border-t border-gray-200 py-7 text-[13px] text-gray-400 dark:border-white/10 dark:text-gray-600">No policies configured.</div>
+					<div class="px-3 py-4 text-xs text-gray-400">No policies configured.</div>
 				{:else}
 					<div class="overflow-x-auto">
-						<table class="w-full table-fixed border-collapse text-[13px]">
-							<thead class="text-left text-xs font-medium text-gray-500 dark:text-gray-500">
-								<tr class="border-y border-gray-200 dark:border-white/10">
-									<th class="h-9 px-1 font-medium">ID</th>
-									<th class="h-9 px-1 font-medium">Image</th>
-									<th class="h-9 px-1 font-medium">CPU</th>
-									<th class="h-9 px-1 font-medium">Memory</th>
-									<th class="h-9 px-1 font-medium">Idle</th>
-									<th class="h-9 px-1 font-medium">Mode</th>
-									<th class="h-9 px-1 font-medium">Reset</th>
-									<th class="h-9 w-20 px-1"></th>
+						<table class="w-full table-fixed border-collapse text-xs">
+							<thead class="text-left text-[11px] font-normal text-gray-500">
+								<tr>
+									<th class="h-7 w-[30%] px-3 font-normal md:w-[20%]">ID</th>
+									<th class="hidden h-7 px-2 font-normal md:table-cell md:w-[35%]">Image</th>
+									<th class="h-7 px-2 font-normal">CPU</th>
+									<th class="h-7 px-2 font-normal">Memory</th>
+									<th class="hidden h-7 px-2 font-normal sm:table-cell">Idle</th>
+									<th class="h-7 px-2 font-normal">Mode</th>
+									<th class="hidden h-7 px-2 font-normal lg:table-cell">Reset</th>
+									<th class="h-7 w-24 px-2"></th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each policies as policy}
-									<tr class="border-b border-gray-200 dark:border-white/10">
-										<td class="h-11 truncate px-1">{policy.id}</td>
-										<td class="h-11 truncate px-1">{policyValue(policy, 'image', 'default')}</td>
-										<td class="h-11 truncate px-1">{policyValue(policy, 'cpu_limit')}</td>
-										<td class="h-11 truncate px-1">{policyValue(policy, 'memory_limit')}</td>
-										<td class="h-11 truncate px-1">{policyValue(policy, 'idle_timeout_minutes')}</td>
-										<td class="h-11 truncate px-1">{restrictedLabel(policy)}</td>
-										<td class="h-11 truncate px-1">{resetSchedule(policy)}</td>
-										<td class="h-11 px-1 text-right">
-											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Roll out to idle terminals" title="Roll out to idle terminals" onclick={() => rolloutPolicy(policy)}>
+									<tr class="text-gray-700 hover:bg-gray-50">
+										<td class="h-7 truncate px-3">{policy.id}</td>
+										<td class="hidden h-7 truncate px-2 md:table-cell">{policyValue(policy, 'image', 'default')}</td>
+										<td class="h-7 truncate px-2">{policyValue(policy, 'cpu_limit')}</td>
+										<td class="h-7 truncate px-2">{policyValue(policy, 'memory_limit')}</td>
+										<td class="hidden h-7 truncate px-2 sm:table-cell">{policyValue(policy, 'idle_timeout_minutes')}</td>
+										<td class="h-7 truncate px-2">{restrictedLabel(policy)}</td>
+										<td class="hidden h-7 truncate px-2 lg:table-cell">{resetSchedule(policy)}</td>
+										<td class="h-7 px-2 text-right">
+											<div class="inline-flex items-center gap-0.5 whitespace-nowrap">
+											<button class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700" type="button" aria-label="Roll out to idle terminals" title="Roll out to idle terminals" onclick={() => rolloutPolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.67" /><path d="M4 4v4.67h4.67" /></svg>
 											</button>
-											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Edit" title="Edit" onclick={() => openPolicy(policy)}>
+											<button class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700" type="button" aria-label="Edit" title="Edit" onclick={() => openPolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
 											</button>
-											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Delete" title="Delete" onclick={() => deletePolicy(policy)}>
+											<button class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700" type="button" aria-label="Delete" title="Delete" onclick={() => deletePolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /></svg>
 											</button>
+											</div>
 										</td>
 									</tr>
 								{/each}
@@ -426,53 +421,53 @@
 			</section>
 
 			{#if notice}
-				<div class="mt-4 text-xs text-emerald-700 dark:text-emerald-400">{notice}</div>
+				<div class="px-3 py-2 text-[11px] text-emerald-700">{notice}</div>
 			{/if}
 			{#if error}
-				<div class="mt-4 text-xs text-red-700 dark:text-red-400">{error}</div>
+				<div class="px-3 py-2 text-[11px] text-red-700">{error}</div>
 			{/if}
 		</main>
 	</div>
 </div>
 
 {#if editingPolicy}
-	<div class="fixed inset-0 z-20 flex items-center justify-center bg-white/75 p-4 backdrop-blur-md dark:bg-black/65">
-		<div class="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-lg border border-gray-200 bg-white p-4 shadow-xl shadow-black/5 dark:border-white/10 dark:bg-gray-950">
-			<div class="mb-4 flex items-center justify-between">
-				<h2 class="text-sm font-medium">{editingPolicy.existing ? 'Edit policy' : 'Add policy'}</h2>
-				<button class="flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Close" onclick={() => (editingPolicy = null)}>
+	<div class="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4">
+		<div class="app-theme max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-3xl border border-gray-200 bg-white p-5 shadow-2xl dark:border-white/6 dark:bg-gray-950">
+			<div class="mb-5 flex items-center justify-between">
+				<h2 class="text-sm font-medium text-gray-900 dark:text-white">{editingPolicy.existing ? 'Edit policy' : 'Add policy'}</h2>
+				<button class="flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300" type="button" aria-label="Close" onclick={() => (editingPolicy = null)}>
 					<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
 				</button>
 			</div>
 
 			<form onsubmit={savePolicy}>
-				<div class="mb-3 border-b border-gray-200 pb-2 text-xs font-medium text-gray-500 dark:border-white/10">Policy</div>
+				<div class="mb-3 border-b border-gray-200 pb-2 text-xs text-gray-400 dark:border-white/6 dark:text-gray-600">Policy</div>
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-					<label class="block text-[11px] font-medium text-gray-500">ID<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
-					<label class="block text-[11px] font-medium text-gray-500">Image<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
-					<label class="block text-[11px] font-medium text-gray-500">CPU<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
-					<label class="block text-[11px] font-medium text-gray-500">Memory<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="memory_limit" value={editingPolicy.data.memory_limit || ''} placeholder="1Gi" /></label>
-					<label class="block text-[11px] font-medium text-gray-500">Storage<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="storage" value={editingPolicy.data.storage || ''} placeholder="5Gi" /></label>
-					<label class="block text-[11px] font-medium text-gray-500">Storage mode<select class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="storage_mode" value={editingPolicy.data.storage_mode || ''}>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">ID<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Image<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">CPU<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Memory<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="memory_limit" value={editingPolicy.data.memory_limit || ''} placeholder="1Gi" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="storage" value={editingPolicy.data.storage || ''} placeholder="5Gi" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage mode<select class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="storage_mode" value={editingPolicy.data.storage_mode || ''}>
 						<option value="">default</option>
 						<option value="per-user">per-user</option>
 						<option value="shared">shared</option>
 						<option value="shared-rwo">shared-rwo</option>
 					</select></label>
-					<label class="block text-[11px] font-medium text-gray-500">Idle timeout<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
-					<label class="flex items-center gap-2 text-[11px] font-medium text-gray-500"><input class="h-4 w-4 rounded border-gray-300" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
-					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
-					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
-					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-xs outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Idle timeout<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
+					<label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400"><input class="h-4 w-4 rounded border-gray-300" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
 				</div>
-				<div class="mb-3 mt-5 border-b border-gray-200 pb-2 text-xs font-medium text-gray-500 dark:border-white/10">Lifecycle</div>
+				<div class="mb-3 mt-5 border-b border-gray-200 pb-2 text-xs text-gray-400 dark:border-white/6 dark:text-gray-600">Lifecycle</div>
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-					<label class="block text-[11px] font-medium text-gray-500">Reset timezone<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
-					<label class="block text-[11px] font-medium text-gray-500 sm:col-span-2">Scheduled reset<input class="mt-1 h-8 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 text-[13px] outline-none focus:border-gray-400 dark:border-white/10 dark:bg-white/5 dark:focus:border-white/25" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Reset timezone<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Scheduled reset<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
 				</div>
-				<div class="mt-4 flex justify-end gap-3">
-					<button class="text-[13px] text-gray-400 transition hover:text-gray-900 dark:hover:text-white" type="button" onclick={() => (editingPolicy = null)}>Cancel</button>
-					<button class="text-[13px] text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-white" type="submit">Save</button>
+				<div class="sticky bottom-0 -mx-5 mt-4 flex justify-end gap-3 border-t border-gray-200 bg-white px-5 py-3 dark:border-white/6 dark:bg-gray-950">
+					<button class="text-xs text-gray-400 transition-colors hover:text-gray-700 dark:hover:text-gray-300" type="button" onclick={() => (editingPolicy = null)}>Cancel</button>
+					<button class="text-xs text-gray-600 transition-colors hover:text-gray-900 dark:text-gray-400 dark:hover:text-white" type="submit">Save</button>
 				</div>
 			</form>
 		</div>
