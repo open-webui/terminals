@@ -21,6 +21,17 @@
 	--color-gray-950: oklch(0.16 0 0);
 }
 
+:root {
+	--app-bg: #ffffff;
+	--app-fg: #525252;
+	--app-fg-muted: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
+	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 48%, var(--app-bg));
+	--app-border: color-mix(in oklab, var(--app-fg) 10%, transparent);
+	--app-divider: color-mix(in oklab, var(--app-fg) 8%, transparent);
+	--app-hover: color-mix(in oklab, var(--app-fg) 6%, transparent);
+	--app-active: color-mix(in oklab, var(--app-fg) 7%, transparent);
+}
+
 @layer base {
 	*,
 	::after,
@@ -32,13 +43,19 @@
 
 	html,
 	body {
-		min-height: 100dvh;
+		height: 100dvh;
 		margin: 0;
-		background: white;
-		color: var(--color-gray-900);
+		background: var(--app-bg);
+		color: var(--app-fg);
+		font-family: var(--font-sans);
 	}
 
 	button {
 		@apply cursor-pointer;
 	}
+}
+
+.app-theme {
+	background: var(--app-bg);
+	color: var(--app-fg);
 }
