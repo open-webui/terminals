@@ -38,6 +38,7 @@
 	let terminals = $state<TerminalRow[]>([]);
 	let policies = $state<PolicyRow[]>([]);
 	let error = $state('');
+	let notice = $state('');
 	let loading = $state(false);
 	let editingPolicy = $state<EditingPolicy | null>(null);
 	const envPlaceholder = '{"OPEN_TERMINAL_ALLOWED_DOMAINS":"github.com"}';
@@ -141,6 +142,7 @@
 
 	async function stopTerminal(row: TerminalRow) {
 		error = '';
+		notice = '';
 		try {
 			await api('/api/v1/terminals/stop', {
 				method: 'POST',
@@ -152,7 +154,23 @@
 		}
 	}
 
+	async function rolloutPolicy(policy: PolicyRow) {
+		error = '';
+		notice = '';
+		try {
+			const result = await api<{ refreshed: number; skipped_active: number }>('/api/v1/terminals/refresh', {
+				method: 'POST',
+				body: JSON.stringify({ policy_id: policy.id, only_idle: true })
+			});
+			notice = `Rolled out to ${result.refreshed} idle terminal${result.refreshed === 1 ? '' : 's'}${result.skipped_active ? `; ${result.skipped_active} active skipped` : ''}.`;
+			await loadAll();
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to roll out policy';
+		}
+	}
+
 	function openPolicy(policy: PolicyRow | null = null) {
+		notice = '';
 		editingPolicy = policy
 			? {
 					id: policy.id,
@@ -166,6 +184,7 @@
 	async function deletePolicy(policy: PolicyRow) {
 		if (!confirm(`Delete policy "${policy.id}"?`)) return;
 		error = '';
+		notice = '';
 		try {
 			await api(`/api/v1/policies/${encodeURIComponent(policy.id)}`, { method: 'DELETE' });
 			await loadAll();
@@ -212,6 +231,7 @@
 	async function savePolicy(event: SubmitEvent) {
 		event.preventDefault();
 		error = '';
+		notice = '';
 		try {
 			const { id, body } = readPolicyForm(event.currentTarget as HTMLFormElement);
 			const lifecycle = readLifecycleForm(event.currentTarget as HTMLFormElement);
@@ -231,9 +251,6 @@
 		}
 	}
 
-	function RefreshIcon() {
-		return 'refresh';
-	}
 </script>
 
 <svelte:head>
@@ -390,6 +407,9 @@
 										<td class="h-11 truncate px-1">{restrictedLabel(policy)}</td>
 										<td class="h-11 truncate px-1">{resetSchedule(policy)}</td>
 										<td class="h-11 px-1 text-right">
+											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Roll out to idle terminals" title="Roll out to idle terminals" onclick={() => rolloutPolicy(policy)}>
+												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.67" /><path d="M4 4v4.67h4.67" /></svg>
+											</button>
 											<button class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-600 dark:hover:bg-white/8 dark:hover:text-white" type="button" aria-label="Edit" title="Edit" onclick={() => openPolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
 											</button>
@@ -405,6 +425,9 @@
 				{/if}
 			</section>
 
+			{#if notice}
+				<div class="mt-4 text-xs text-emerald-700 dark:text-emerald-400">{notice}</div>
+			{/if}
 			{#if error}
 				<div class="mt-4 text-xs text-red-700 dark:text-red-400">{error}</div>
 			{/if}

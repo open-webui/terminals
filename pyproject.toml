@@ -38,3 +38,4 @@ include = [
     "terminals/migrations/**/*",
     "terminals/frontend/build/**/*",
 ]
+artifacts = ["terminals/frontend/build/**/*"]
