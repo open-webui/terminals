@@ -31,27 +31,55 @@ router = APIRouter()
 # Proxy client
 # ---------------------------------------------------------------------------
 
-_proxy_client: Optional[httpx.AsyncClient] = None
+# One small client per upstream origin (host, port). httpcore scans a
+# client's ENTIRE connection pool — including a readability syscall per idle
+# keepalive connection — on every request event, so a single shared pool
+# over hundreds of distinct terminal containers spends most of the event
+# loop in pool management (observed ~69% of CPU under py-spy at ~600
+# containers). Per-origin pools keep each scan at a handful of connections.
+_proxy_clients: dict[tuple[str, int], httpx.AsyncClient] = {}
+_PROXY_CLIENTS_MAX = 1200  # LRU-evict beyond this many distinct origins
+_client_close_tasks: set = set()
 
 # Active WebSocket connection counter (for stats endpoint)
 active_ws_connections: int = 0
 
 
-async def _get_proxy_client() -> httpx.AsyncClient:
-    global _proxy_client
-    if _proxy_client is None:
-        _proxy_client = httpx.AsyncClient(
+async def _get_proxy_client(host: str, port: int) -> httpx.AsyncClient:
+    key = (host, port)
+    # dict preserves insertion order — pop + reinsert keeps it LRU-ordered.
+    client = _proxy_clients.pop(key, None)
+    if client is None:
+        client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
-            limits=httpx.Limits(keepalive_expiry=4.0),
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=4,
+                keepalive_expiry=30.0,
+            ),
         )
-    return _proxy_client
+    _proxy_clients[key] = client
+
+    # Evict the least-recently-used origin (stale after container teardown /
+    # port change) so held sockets don't accumulate forever.
+    if len(_proxy_clients) > _PROXY_CLIENTS_MAX:
+        old_key = next(iter(_proxy_clients))
+        old_client = _proxy_clients.pop(old_key)
+        task = asyncio.get_running_loop().create_task(old_client.aclose())
+        _client_close_tasks.add(task)
+        task.add_done_callback(_client_close_tasks.discard)
+
+    return client
 
 
 async def close_proxy_client() -> None:
-    global _proxy_client
-    if _proxy_client is not None:
-        await _proxy_client.aclose()
-        _proxy_client = None
+    clients = list(_proxy_clients.values())
+    _proxy_clients.clear()
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +159,18 @@ async def _proxy_request(
     Streams both the request body (upload) and response body (download)
     to avoid buffering large payloads in memory.
     """
+    backend = request.app.state.backend
     instance = await _resolve_instance(
         request, user_id, policy_id=policy_id, spec=spec,
     )
 
-    target_url = f"http://{instance.host}:{instance.port}/{path}"
-    if request.query_params:
-        target_url += f"?{request.query_params}"
+    def _target_url(inst: InstanceInfo) -> str:
+        url = f"http://{inst.host}:{inst.port}/{path}"
+        if request.query_params:
+            url += f"?{request.query_params}"
+        return url
+
+    target_url = _target_url(instance)
 
     headers = dict(request.headers)
     # Replace auth with the instance's own API key.
@@ -149,7 +182,7 @@ async def _proxy_request(
     # Read the request body upfront (needed for retries).
     body = await request.body()
 
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
 
     # Retry on connection errors — the container may still be starting.
     max_retries = 5
@@ -166,9 +199,27 @@ async def _proxy_request(
             )
             break
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # The tracked instance isn't reachable — stop trusting the cached
+            # status and re-resolve. ensure_terminal re-checks the container
+            # and re-provisions if it died, healing mid-request.
+            backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
+                try:
+                    instance = await _resolve_instance(
+                        request, user_id, policy_id=policy_id, spec=spec,
+                    )
+                except Exception as resolve_err:
+                    logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
+                    return Response(
+                        content='{"error": "Terminal instance not reachable"}',
+                        status_code=502,
+                        media_type="application/json",
+                    )
+                target_url = _target_url(instance)
+                headers["authorization"] = f"Bearer {instance.api_key}"
+                client = await _get_proxy_client(instance.host, instance.port)
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
@@ -177,6 +228,9 @@ async def _proxy_request(
                     media_type="application/json",
                 )
         except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+            # Could be a stale pooled connection, or the container died
+            # mid-request — re-verify its status on the next resolve.
+            backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug(
                     "Proxy attempt {} to {} hit a stale upstream connection ({}), retrying...",
@@ -225,7 +279,7 @@ async def _fetch_spec_with_retry(instance: InstanceInfo) -> dict:
     Newly provisioned containers may need a few seconds to start serving.
     This retries with a short delay to avoid returning 502 on first access.
     """
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
     url = f"http://{instance.host}:{instance.port}/openapi.json"
     headers = {"Authorization": f"Bearer {instance.api_key}"}
 
@@ -282,7 +336,13 @@ async def _get_cached_spec(
     instance = await _resolve_instance(
         request, _SYSTEM_USER_ID, policy_id=policy_id, spec=spec,
     )
-    raw = await _fetch_spec_with_retry(instance)
+    try:
+        raw = await _fetch_spec_with_retry(instance)
+    except Exception:
+        # The system instance may be gone — re-verify it on the next attempt
+        # instead of trusting the cached status for the full TTL.
+        request.app.state.backend.invalidate_status(_SYSTEM_USER_ID, policy_id)
+        raise
     stripped = _strip_auth_from_spec(raw)
     _spec_cache[policy_id] = (now, stripped)
     return stripped
@@ -477,7 +537,24 @@ async def _ws_proxy_handler(
     """Core WebSocket proxy logic, shared by default and policy routes."""
     global active_ws_connections
     active_ws_connections += 1
+    try:
+        await _ws_proxy(ws, session_id, user_id, policy_id=policy_id, spec=spec)
+    finally:
+        active_ws_connections -= 1
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
+
+async def _ws_proxy(
+    ws: WebSocket,
+    session_id: str,
+    user_id: str,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
+):
+    backend = ws.app.state.backend
     try:
         instance = await _resolve_instance(
             ws, user_id, policy_id=policy_id, spec=spec
@@ -487,19 +564,40 @@ async def _ws_proxy_handler(
         await ws.close(code=4003, reason="Failed to resolve terminal instance")
         return
 
-    upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
-
     # Retry WebSocket connection — the container may still be starting.
+    # permessage-deflate is disabled by default: compressing every terminal
+    # frame in pure Python burns significant CPU at scale for traffic that
+    # normally stays on the local host / LAN.
+    ws_compression = "deflate" if settings.ws_compression else None
     max_retries = 5
     upstream = None
     for attempt in range(max_retries):
+        upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
         try:
-            upstream = await websockets.connect(upstream_url)
+            upstream = await websockets.connect(
+                upstream_url, compression=ws_compression
+            )
             break
-        except (ConnectionRefusedError, OSError) as e:
+        except (
+            ConnectionRefusedError,
+            OSError,
+            websockets.exceptions.InvalidHandshake,
+        ) as e:
+            # Unreachable (or answering but not upgrading yet) — stop
+            # trusting the cached status and re-resolve, so a container
+            # that died gets re-provisioned mid-connect.
+            backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
+                try:
+                    instance = await _resolve_instance(
+                        ws, user_id, policy_id=policy_id, spec=spec
+                    )
+                except Exception as resolve_err:
+                    logger.error("WS re-resolve for user {} failed: {}", user_id, resolve_err)
+                    await ws.close(code=4003, reason="Terminal instance not reachable")
+                    return
             else:
                 logger.error("WS connect to {} failed after {} retries: {}", upstream_url, max_retries, e)
                 await ws.close(code=4003, reason="Terminal instance not reachable")
@@ -539,12 +637,6 @@ async def _ws_proxy_handler(
             )
     except Exception as e:
         logger.error("WebSocket terminal proxy error: {}", e)
-    finally:
-        active_ws_connections -= 1
-        try:
-            await ws.close()
-        except Exception:
-            pass
 
 
 @router.websocket("/api/terminals/{session_id}")

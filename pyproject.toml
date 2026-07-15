@@ -38,3 +38,9 @@ include = [
     "terminals/migrations/**/*",
     "terminals/frontend/build/**/*",
 ]
+# .gitignore contains "build/", and hatchling excludes VCS-ignored files even
+# when they match `include`. Ignored build outputs must be listed as artifacts,
+# otherwise wheels (and the Docker image) ship without the admin UI.
+artifacts = [
+    "terminals/frontend/build",
+]
