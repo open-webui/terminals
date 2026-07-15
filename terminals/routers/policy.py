@@ -274,6 +274,9 @@ async def upsert_policy(policy_id: str, body: PolicyData):
 
         await session.commit()
 
+        from terminals.routers.proxy import invalidate_policy_caches
+        invalidate_policy_caches(policy_id)
+
         return PolicyResponse(
             id=policy.id,
             data=policy.data or {},
@@ -299,4 +302,6 @@ async def delete_policy(policy_id: str):
 
         await session.delete(policy)
         await session.commit()
+        from terminals.routers.proxy import invalidate_policy_caches
+        invalidate_policy_caches(policy_id)
         return {"ok": True}
