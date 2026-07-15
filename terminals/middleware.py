@@ -2,24 +2,41 @@
 
 import uuid
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response
 
-
-class RequestIdMiddleware(BaseHTTPMiddleware):
+class RequestIdMiddleware:
     """Attach a unique ``request_id`` to every request.
 
     The ID is stored in ``request.state.request_id`` for downstream use
     and returned as an ``X-Request-Id`` response header.
+
+    Implemented as pure ASGI: Starlette's ``BaseHTTPMiddleware`` wraps every
+    request in extra task machinery, which is measurable overhead on the
+    proxy hot path.
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
-        request.state.request_id = request_id
+    def __init__(self, app):
+        self.app = app
 
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = ""
+        for key, value in scope.get("headers") or []:
+            if key == b"x-request-id":
+                request_id = value.decode("latin-1")
+                break
+        if not request_id:
+            request_id = str(uuid.uuid4())
+
+        scope.setdefault("state", {})["request_id"] = request_id
+        request_id_bytes = request_id.encode("latin-1")
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                headers.append((b"x-request-id", request_id_bytes))
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)

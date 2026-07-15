@@ -167,6 +167,8 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 | `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. The cache is invalidated immediately when a proxied connection fails. |
 | `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links — per-frame compression is CPU-expensive at high session counts. |
+| `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default: at high request rates the per-request log record is measurable CPU. |
+| `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only), avoiding one Open WebUI round trip per proxied request. A revoked token stays usable for up to the TTL; `0` validates every request. |
 
 See [`config.py`](terminals/config.py) for the full list.
 

@@ -40,6 +40,10 @@ class Settings(BaseSettings):
                                     # before re-inspecting the container (0 = every request)
     ws_compression: bool = False    # permessage-deflate on proxied WebSocket traffic
                                     # (CPU-heavy per frame; leave off for LAN deployments)
+    access_log: bool = False        # per-request access logging (frame-walking log
+                                    # record per request — measurable CPU at scale)
+    token_cache_ttl: int = 60       # seconds a validated Open WebUI token is cached
+                                    # (JWT mode only; 0 = validate every request)
 
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"

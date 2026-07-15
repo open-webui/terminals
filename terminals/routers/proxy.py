@@ -40,9 +40,17 @@ active_ws_connections: int = 0
 async def _get_proxy_client() -> httpx.AsyncClient:
     global _proxy_client
     if _proxy_client is None:
+        # The pool must be sized for one upstream per active user: the httpx
+        # defaults (100 connections, 20 keepalive) force constant TCP churn
+        # and request queuing at hundreds of concurrent terminals. Stale
+        # keepalive connections are handled by the RemoteProtocolError retry.
         _proxy_client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
-            limits=httpx.Limits(keepalive_expiry=4.0),
+            limits=httpx.Limits(
+                max_connections=2000,
+                max_keepalive_connections=1000,
+                keepalive_expiry=30.0,
+            ),
         )
     return _proxy_client
 
