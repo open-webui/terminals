@@ -31,35 +31,55 @@ router = APIRouter()
 # Proxy client
 # ---------------------------------------------------------------------------
 
-_proxy_client: Optional[httpx.AsyncClient] = None
+# One small client per upstream origin (host, port). httpcore scans a
+# client's ENTIRE connection pool — including a readability syscall per idle
+# keepalive connection — on every request event, so a single shared pool
+# over hundreds of distinct terminal containers spends most of the event
+# loop in pool management (observed ~69% of CPU under py-spy at ~600
+# containers). Per-origin pools keep each scan at a handful of connections.
+_proxy_clients: dict[tuple[str, int], httpx.AsyncClient] = {}
+_PROXY_CLIENTS_MAX = 1200  # LRU-evict beyond this many distinct origins
+_client_close_tasks: set = set()
 
 # Active WebSocket connection counter (for stats endpoint)
 active_ws_connections: int = 0
 
 
-async def _get_proxy_client() -> httpx.AsyncClient:
-    global _proxy_client
-    if _proxy_client is None:
-        # The pool must be sized for one upstream per active user: the httpx
-        # defaults (100 connections, 20 keepalive) force constant TCP churn
-        # and request queuing at hundreds of concurrent terminals. Stale
-        # keepalive connections are handled by the RemoteProtocolError retry.
-        _proxy_client = httpx.AsyncClient(
+async def _get_proxy_client(host: str, port: int) -> httpx.AsyncClient:
+    key = (host, port)
+    # dict preserves insertion order — pop + reinsert keeps it LRU-ordered.
+    client = _proxy_clients.pop(key, None)
+    if client is None:
+        client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
             limits=httpx.Limits(
-                max_connections=2000,
-                max_keepalive_connections=1000,
+                max_connections=32,
+                max_keepalive_connections=4,
                 keepalive_expiry=30.0,
             ),
         )
-    return _proxy_client
+    _proxy_clients[key] = client
+
+    # Evict the least-recently-used origin (stale after container teardown /
+    # port change) so held sockets don't accumulate forever.
+    if len(_proxy_clients) > _PROXY_CLIENTS_MAX:
+        old_key = next(iter(_proxy_clients))
+        old_client = _proxy_clients.pop(old_key)
+        task = asyncio.get_running_loop().create_task(old_client.aclose())
+        _client_close_tasks.add(task)
+        task.add_done_callback(_client_close_tasks.discard)
+
+    return client
 
 
 async def close_proxy_client() -> None:
-    global _proxy_client
-    if _proxy_client is not None:
-        await _proxy_client.aclose()
-        _proxy_client = None
+    clients = list(_proxy_clients.values())
+    _proxy_clients.clear()
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +182,7 @@ async def _proxy_request(
     # Read the request body upfront (needed for retries).
     body = await request.body()
 
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
 
     # Retry on connection errors — the container may still be starting.
     max_retries = 5
@@ -199,6 +219,7 @@ async def _proxy_request(
                     )
                 target_url = _target_url(instance)
                 headers["authorization"] = f"Bearer {instance.api_key}"
+                client = await _get_proxy_client(instance.host, instance.port)
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
@@ -258,7 +279,7 @@ async def _fetch_spec_with_retry(instance: InstanceInfo) -> dict:
     Newly provisioned containers may need a few seconds to start serving.
     This retries with a short delay to avoid returning 502 on first access.
     """
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
     url = f"http://{instance.host}:{instance.port}/openapi.json"
     headers = {"Authorization": f"Bearer {instance.api_key}"}
 

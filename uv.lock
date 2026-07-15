@@ -1114,7 +1114,7 @@ wheels = [
 
 [[package]]
 name = "terminals"
-version = "0.0.5.post2"
+version = "0.0.5.post3"
 source = { editable = "." }
 dependencies = [
     { name = "aiodocker" },
