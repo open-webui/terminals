@@ -38,6 +38,7 @@ class Backend(ABC):
         self._instances: dict[str, dict] = {}       # → provision result dict
         self._specs: dict[str, dict] = {}           # → resolved policy spec
         self._locks: dict[str, asyncio.Lock] = {}   # → per-key provisioning lock
+        self._status_ok_at: dict[str, float] = {}   # → last confirmed-running check
         self._reaper_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -95,6 +96,29 @@ class Backend(ABC):
         self._activity[key] = time.monotonic()
         self._activity_wall[key] = time.time()
 
+    # ------------------------------------------------------------------
+    # Status cache — avoid re-inspecting the container on every request
+    # ------------------------------------------------------------------
+
+    def _status_fresh(self, key: str) -> bool:
+        ttl = settings.status_cache_ttl
+        if ttl <= 0:
+            return False
+        checked = self._status_ok_at.get(key)
+        return checked is not None and (time.monotonic() - checked) < ttl
+
+    def _mark_status_ok(self, key: str) -> None:
+        self._status_ok_at[key] = time.monotonic()
+
+    def invalidate_status(self, user_id: str, policy_id: str = "default") -> None:
+        """Force the next request for this key to re-verify instance status.
+
+        Called by the proxy when it fails to connect to an instance that
+        was assumed running — the re-check detects a dead container and
+        re-provisions it.
+        """
+        self._status_ok_at.pop(self._key(user_id, policy_id), None)
+
     async def ensure_terminal(
         self,
         user_id: str,
@@ -114,8 +138,15 @@ class Backend(ABC):
         # Fast path — already tracked and running.
         if key in self._instances:
             info = self._instances[key]
+            # Skip the backend status inspection while the last confirmed
+            # check is fresh — at hundreds of users this is the difference
+            # between pure dict lookups and 2 Docker API calls per request.
+            if self._status_fresh(key):
+                self._record_activity(key)
+                return info
             st = await self.status(info["instance_id"])
             if st == "running":
+                self._mark_status_ok(key)
                 self._record_activity(key)
                 return info
 
@@ -130,18 +161,21 @@ class Backend(ABC):
                 info = self._instances[key]
                 st = await self.status(info["instance_id"])
                 if st == "running":
+                    self._mark_status_ok(key)
                     self._record_activity(key)
                     return info
                 self._instances.pop(key, None)
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
+                self._status_ok_at.pop(key, None)
 
             await self._apply_due_reset(user_id, policy_id, spec)
             result = await self.provision(user_id, policy_id=policy_id, spec=spec)
             if result:
                 self._instances[key] = result
                 self._specs[key] = spec or {}
+                self._mark_status_ok(key)
                 self._record_activity(key)
             return result
 
@@ -218,6 +252,7 @@ class Backend(ABC):
             self._specs.pop(key, None)
             self._activity.pop(key, None)
             self._activity_wall.pop(key, None)
+            self._status_ok_at.pop(key, None)
             self._locks.pop(key, None)
             result.refreshed += 1
 
@@ -337,4 +372,5 @@ class Backend(ABC):
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
+                self._status_ok_at.pop(key, None)
                 self._locks.pop(key, None)

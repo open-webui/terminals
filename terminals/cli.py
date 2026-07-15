@@ -62,6 +62,9 @@ def serve(host: str | None, port: int | None, api_key: str | None):
         host=effective_host,
         port=effective_port,
         log_level=normalize_log_level(settings.log_level).lower(),
+        # Terminal streams re-compressed per frame in pure Python are a major
+        # CPU cost at scale — only enable when explicitly configured.
+        ws_per_message_deflate=settings.ws_compression,
     )
 
 

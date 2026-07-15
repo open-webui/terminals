@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     enable_ui: bool = True
 
+    # Proxy performance
+    status_cache_ttl: int = 30      # seconds a confirmed-running status is trusted
+                                    # before re-inspecting the container (0 = every request)
+    ws_compression: bool = False    # permessage-deflate on proxied WebSocket traffic
+                                    # (CPU-heavy per frame; leave off for LAN deployments)
+
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"
     kubernetes_image: str = "ghcr.io/open-webui/open-terminal:latest"
