@@ -1,5 +1,7 @@
 """Authentication dependencies for the proxy and API routes."""
 
+import hashlib
+import time
 from typing import Optional
 
 import httpx
@@ -8,6 +10,7 @@ from fastapi import Depends, Header, HTTPException
 from terminals.config import settings
 
 _owui_client: Optional[httpx.AsyncClient] = None
+_token_cache: dict[str, tuple[float, str]] = {}
 
 
 async def _get_owui_client() -> httpx.AsyncClient:
@@ -19,6 +22,7 @@ async def _get_owui_client() -> httpx.AsyncClient:
 
 async def close_auth_client() -> None:
     global _owui_client
+    _token_cache.clear()
     if _owui_client is not None:
         await _owui_client.aclose()
         _owui_client = None
@@ -32,6 +36,13 @@ async def validate_token(token: str) -> Optional[str]:
 
     Only call when ``settings.open_webui_url`` is set.
     """
+    ttl = settings.token_cache_ttl
+    key = hashlib.sha256(token.encode()).hexdigest() if ttl > 0 else ""
+    if key:
+        cached = _token_cache.get(key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
     client = await _get_owui_client()
     url = settings.open_webui_url.rstrip("/")
     try:
@@ -48,6 +59,10 @@ async def validate_token(token: str) -> Optional[str]:
     verified_user_id = data.get("id")
     if not verified_user_id:
         raise HTTPException(status_code=401, detail="Token response missing user ID")
+    if key:
+        if len(_token_cache) >= 10000:
+            _token_cache.clear()
+        _token_cache[key] = (time.monotonic() + ttl, verified_user_id)
     return verified_user_id
 
 

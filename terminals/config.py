@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     enable_ui: bool = True
+    status_cache_ttl: int = 30
+    token_cache_ttl: int = 60
+    ws_compression: bool = False
+    access_log: bool = False
 
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"

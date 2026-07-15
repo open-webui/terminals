@@ -18,6 +18,7 @@ from typing import Optional
 
 import httpx
 import websockets
+from websockets.exceptions import InvalidHandshake
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
@@ -31,27 +32,34 @@ router = APIRouter()
 # Proxy client
 # ---------------------------------------------------------------------------
 
-_proxy_client: Optional[httpx.AsyncClient] = None
+_proxy_clients: dict[tuple[str, int], httpx.AsyncClient] = {}
 
 # Active WebSocket connection counter (for stats endpoint)
 active_ws_connections: int = 0
 
 
-async def _get_proxy_client() -> httpx.AsyncClient:
-    global _proxy_client
-    if _proxy_client is None:
-        _proxy_client = httpx.AsyncClient(
+async def _get_proxy_client(host: str, port: int) -> httpx.AsyncClient:
+    client = _proxy_clients.pop((host, port), None)
+    if client is None:
+        client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
-            limits=httpx.Limits(keepalive_expiry=4.0),
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=4,
+                keepalive_expiry=30.0,
+            ),
         )
-    return _proxy_client
+    _proxy_clients[(host, port)] = client
+    if len(_proxy_clients) > 1200:
+        await _proxy_clients.pop(next(iter(_proxy_clients))).aclose()
+    return client
 
 
 async def close_proxy_client() -> None:
-    global _proxy_client
-    if _proxy_client is not None:
-        await _proxy_client.aclose()
-        _proxy_client = None
+    clients = list(_proxy_clients.values())
+    _proxy_clients.clear()
+    for client in clients:
+        await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +157,7 @@ async def _proxy_request(
     # Read the request body upfront (needed for retries).
     body = await request.body()
 
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
 
     # Retry on connection errors — the container may still be starting.
     max_retries = 5
@@ -166,9 +174,18 @@ async def _proxy_request(
             )
             break
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            request.app.state.backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
+                instance = await _resolve_instance(
+                    request, user_id, policy_id=policy_id, spec=spec
+                )
+                target_url = f"http://{instance.host}:{instance.port}/{path}"
+                if request.query_params:
+                    target_url += f"?{request.query_params}"
+                headers["authorization"] = f"Bearer {instance.api_key}"
+                client = await _get_proxy_client(instance.host, instance.port)
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
@@ -177,6 +194,7 @@ async def _proxy_request(
                     media_type="application/json",
                 )
         except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+            request.app.state.backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug(
                     "Proxy attempt {} to {} hit a stale upstream connection ({}), retrying...",
@@ -184,6 +202,14 @@ async def _proxy_request(
                     target_url,
                     e,
                 )
+                instance = await _resolve_instance(
+                    request, user_id, policy_id=policy_id, spec=spec
+                )
+                target_url = f"http://{instance.host}:{instance.port}/{path}"
+                if request.query_params:
+                    target_url += f"?{request.query_params}"
+                headers["authorization"] = f"Bearer {instance.api_key}"
+                client = await _get_proxy_client(instance.host, instance.port)
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
                 return Response(
@@ -225,7 +251,7 @@ async def _fetch_spec_with_retry(instance: InstanceInfo) -> dict:
     Newly provisioned containers may need a few seconds to start serving.
     This retries with a short delay to avoid returning 502 on first access.
     """
-    client = await _get_proxy_client()
+    client = await _get_proxy_client(instance.host, instance.port)
     url = f"http://{instance.host}:{instance.port}/openapi.json"
     headers = {"Authorization": f"Bearer {instance.api_key}"}
 
@@ -282,7 +308,11 @@ async def _get_cached_spec(
     instance = await _resolve_instance(
         request, _SYSTEM_USER_ID, policy_id=policy_id, spec=spec,
     )
-    raw = await _fetch_spec_with_retry(instance)
+    try:
+        raw = await _fetch_spec_with_retry(instance)
+    except Exception:
+        request.app.state.backend.invalidate_status(_SYSTEM_USER_ID, policy_id)
+        raise
     stripped = _strip_auth_from_spec(raw)
     _spec_cache[policy_id] = (now, stripped)
     return stripped
@@ -493,19 +523,29 @@ async def _ws_proxy_handler(
         await ws.close(code=4003, reason="Failed to resolve terminal instance")
         return
 
-    upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
-
     # Retry WebSocket connection — the container may still be starting.
     max_retries = 5
     upstream = None
     for attempt in range(max_retries):
+        upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
         try:
-            upstream = await websockets.connect(upstream_url)
+            upstream = await websockets.connect(
+                upstream_url,
+                compression="deflate" if settings.ws_compression else None,
+            )
             break
-        except (ConnectionRefusedError, OSError) as e:
+        except (
+            ConnectionRefusedError,
+            OSError,
+            InvalidHandshake,
+        ) as e:
+            ws.app.state.backend.invalidate_status(user_id, policy_id)
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
+                instance = await _resolve_instance(
+                    ws, user_id, policy_id=policy_id, spec=spec
+                )
             else:
                 logger.error("WS connect to {} failed after {} retries: {}", upstream_url, max_retries, e)
                 await ws.close(code=4003, reason="Terminal instance not reachable")

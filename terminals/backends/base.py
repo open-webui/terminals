@@ -38,6 +38,7 @@ class Backend(ABC):
         self._instances: dict[str, dict] = {}       # → provision result dict
         self._specs: dict[str, dict] = {}           # → resolved policy spec
         self._locks: dict[str, asyncio.Lock] = {}   # → per-key provisioning lock
+        self._running_checked_at: dict[str, float] = {}
         self._reaper_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -95,6 +96,9 @@ class Backend(ABC):
         self._activity[key] = time.monotonic()
         self._activity_wall[key] = time.time()
 
+    def invalidate_status(self, user_id: str, policy_id: str = "default") -> None:
+        self._running_checked_at.pop(self._key(user_id, policy_id), None)
+
     async def ensure_terminal(
         self,
         user_id: str,
@@ -114,8 +118,17 @@ class Backend(ABC):
         # Fast path — already tracked and running.
         if key in self._instances:
             info = self._instances[key]
+            checked = self._running_checked_at.get(key)
+            if (
+                settings.status_cache_ttl > 0
+                and checked is not None
+                and time.monotonic() - checked < settings.status_cache_ttl
+            ):
+                self._record_activity(key)
+                return info
             st = await self.status(info["instance_id"])
             if st == "running":
+                self._running_checked_at[key] = time.monotonic()
                 self._record_activity(key)
                 return info
 
@@ -130,18 +143,21 @@ class Backend(ABC):
                 info = self._instances[key]
                 st = await self.status(info["instance_id"])
                 if st == "running":
+                    self._running_checked_at[key] = time.monotonic()
                     self._record_activity(key)
                     return info
                 self._instances.pop(key, None)
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
+                self._running_checked_at.pop(key, None)
 
             await self._apply_due_reset(user_id, policy_id, spec)
             result = await self.provision(user_id, policy_id=policy_id, spec=spec)
             if result:
                 self._instances[key] = result
                 self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
                 self._record_activity(key)
             return result
 
@@ -218,6 +234,7 @@ class Backend(ABC):
             self._specs.pop(key, None)
             self._activity.pop(key, None)
             self._activity_wall.pop(key, None)
+            self._running_checked_at.pop(key, None)
             self._locks.pop(key, None)
             result.refreshed += 1
 
@@ -337,4 +354,5 @@ class Backend(ABC):
                 self._specs.pop(key, None)
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
+                self._running_checked_at.pop(key, None)
                 self._locks.pop(key, None)

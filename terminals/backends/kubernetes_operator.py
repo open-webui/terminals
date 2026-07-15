@@ -13,6 +13,7 @@ import base64
 import hashlib
 import logging
 import re
+import time
 from typing import Optional
 
 from kubernetes_asyncio import client, config
@@ -57,6 +58,7 @@ class KubernetesOperatorBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
+        self._last_activity_status_updated_at: dict[str, float] = {}
 
     async def _ensure_client(self) -> ApiClient:
         if self._api_client is None:
@@ -254,6 +256,14 @@ class KubernetesOperatorBackend(Backend):
         When *wait* is True (default), polls until the CR returns 404 so that
         a subsequent create won't collide with the kopf finalizer.
         """
+        key = self._key(user_id, policy_id)
+        self._instances.pop(key, None)
+        self._specs.pop(key, None)
+        self._activity.pop(key, None)
+        self._activity_wall.pop(key, None)
+        self._running_checked_at.pop(key, None)
+        self._last_activity_status_updated_at.pop(key, None)
+
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
         name = _sanitize_name(user_id, policy_id)
@@ -535,6 +545,13 @@ class KubernetesOperatorBackend(Backend):
                 plural=self._plural,
                 name=name,
             )
+            key = self._key(item_user or "", item_policy)
+            self._instances.pop(key, None)
+            self._specs.pop(key, None)
+            self._activity.pop(key, None)
+            self._activity_wall.pop(key, None)
+            self._running_checked_at.pop(key, None)
+            self._last_activity_status_updated_at.pop(key, None)
             result.refreshed += 1
 
             if reset and item_user:
@@ -679,6 +696,15 @@ class KubernetesOperatorBackend(Backend):
         Returns a dict with ``api_key``, ``host``, ``port`` or ``None``.
         """
         key = self._key(user_id, policy_id)
+        checked = self._running_checked_at.get(key)
+        if (
+            key in self._instances
+            and settings.status_cache_ttl > 0
+            and checked is not None
+            and time.monotonic() - checked < settings.status_cache_ttl
+        ):
+            self._record_activity(key)
+            return self._instances[key]
 
         # Fast path: check if CR is already Running without taking the lock.
         cr = await self._get_terminal_cr(user_id, policy_id)
@@ -689,13 +715,18 @@ class KubernetesOperatorBackend(Backend):
                 api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
                 if api_key:
                     host, port = self._parse_service_url(status["serviceUrl"])
-                    return {
+                    info = {
                         "instance_id": cr["metadata"]["uid"],
                         "instance_name": cr["metadata"]["name"],
                         "api_key": api_key,
                         "host": host,
                         "port": port,
                     }
+                    self._instances[key] = info
+                    self._specs[key] = spec or {}
+                    self._running_checked_at[key] = time.monotonic()
+                    self._record_activity(key)
+                    return info
 
         # Serialise provisioning per key.
         if key not in self._locks:
@@ -707,7 +738,13 @@ class KubernetesOperatorBackend(Backend):
 
             if cr is None:
                 await self._apply_due_reset(user_id, policy_id, spec)
-                return await self.provision(user_id, policy_id=policy_id, spec=spec)
+                info = await self.provision(user_id, policy_id=policy_id, spec=spec)
+                if info:
+                    self._instances[key] = info
+                    self._specs[key] = spec or {}
+                    self._running_checked_at[key] = time.monotonic()
+                    self._record_activity(key)
+                return info
 
             status = cr.get("status") or {}
             phase = status.get("phase")
@@ -720,19 +757,30 @@ class KubernetesOperatorBackend(Backend):
                 )
                 await self._delete_terminal_cr(user_id, policy_id)
                 await self._apply_due_reset(user_id, policy_id, spec)
-                return await self.provision(user_id, policy_id=policy_id, spec=spec)
+                info = await self.provision(user_id, policy_id=policy_id, spec=spec)
+                if info:
+                    self._instances[key] = info
+                    self._specs[key] = spec or {}
+                    self._running_checked_at[key] = time.monotonic()
+                    self._record_activity(key)
+                return info
 
             if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
                 api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
                 if api_key:
                     host, port = self._parse_service_url(status["serviceUrl"])
-                    return {
+                    info = {
                         "instance_id": cr["metadata"]["uid"],
                         "instance_name": cr["metadata"]["name"],
                         "api_key": api_key,
                         "host": host,
                         "port": port,
                     }
+                    self._instances[key] = info
+                    self._specs[key] = spec or {}
+                    self._running_checked_at[key] = time.monotonic()
+                    self._record_activity(key)
+                    return info
 
             # Still provisioning — wait for the operator to bring it up
             name = cr["metadata"]["name"]
@@ -740,13 +788,18 @@ class KubernetesOperatorBackend(Backend):
             ready = await self._wait_for_ready(name, ns, timeout=120)
             if ready:
                 host, port = self._parse_service_url(ready["service_url"])
-                return {
+                info = {
                     "instance_id": cr["metadata"]["uid"],
                     "instance_name": cr["metadata"]["name"],
                     "api_key": ready["api_key"],
                     "host": host,
                     "port": port,
                 }
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+                self._record_activity(key)
+                return info
 
             return None
 
@@ -777,6 +830,16 @@ class KubernetesOperatorBackend(Backend):
         self, user_id: str, policy_id: str = "default"
     ) -> None:
         """Update lastActivityAt on the Terminal CR to prevent idle culling."""
+        key = self._key(user_id, policy_id)
+        checked = self._last_activity_status_updated_at.get(key)
+        self._record_activity(key)
+        if (
+            settings.status_cache_ttl > 0
+            and checked is not None
+            and time.monotonic() - checked < settings.status_cache_ttl
+        ):
+            return
+
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
         name = _sanitize_name(user_id, policy_id)
@@ -793,6 +856,10 @@ class KubernetesOperatorBackend(Backend):
                 body={"status": {"lastActivityAt": now}},
                 _content_type="application/merge-patch+json",
             )
+            self._last_activity_status_updated_at[key] = time.monotonic()
         except client.exceptions.ApiException as e:
             if e.status != 404:
                 log.warning("Failed to touch activity for %s: %s", name, e)
+            else:
+                self.invalidate_status(user_id, policy_id)
+                self._last_activity_status_updated_at.pop(key, None)

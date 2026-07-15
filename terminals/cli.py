@@ -62,6 +62,8 @@ def serve(host: str | None, port: int | None, api_key: str | None):
         host=effective_host,
         port=effective_port,
         log_level=normalize_log_level(settings.log_level).lower(),
+        ws_per_message_deflate=settings.ws_compression,
+        access_log=settings.access_log,
     )
 
 
