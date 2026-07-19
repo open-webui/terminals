@@ -178,9 +178,17 @@ async def _proxy_request(
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
-                instance = await _resolve_instance(
-                    request, user_id, policy_id=policy_id, spec=spec
-                )
+                try:
+                    instance = await _resolve_instance(
+                        request, user_id, policy_id=policy_id, spec=spec
+                    )
+                except Exception as resolve_err:
+                    logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
+                    return Response(
+                        content='{"error": "Terminal instance not reachable"}',
+                        status_code=502,
+                        media_type="application/json",
+                    )
                 target_url = f"http://{instance.host}:{instance.port}/{path}"
                 if request.query_params:
                     target_url += f"?{request.query_params}"
@@ -202,9 +210,17 @@ async def _proxy_request(
                     target_url,
                     e,
                 )
-                instance = await _resolve_instance(
-                    request, user_id, policy_id=policy_id, spec=spec
-                )
+                try:
+                    instance = await _resolve_instance(
+                        request, user_id, policy_id=policy_id, spec=spec
+                    )
+                except Exception as resolve_err:
+                    logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
+                    return Response(
+                        content='{"error": "Upstream connection failed"}',
+                        status_code=502,
+                        media_type="application/json",
+                    )
                 target_url = f"http://{instance.host}:{instance.port}/{path}"
                 if request.query_params:
                     target_url += f"?{request.query_params}"
@@ -510,10 +526,31 @@ async def _ws_proxy_handler(
     policy_id: str = "default",
     spec: Optional[dict] = None,
 ):
-    """Core WebSocket proxy logic, shared by default and policy routes."""
+    """Core WebSocket proxy logic, shared by default and policy routes.
+
+    The connection counter is maintained here with a try/finally around the
+    whole proxy body — early returns on resolve/connect failures previously
+    skipped the decrement, inflating the counter permanently.
+    """
     global active_ws_connections
     active_ws_connections += 1
+    try:
+        await _ws_proxy(ws, session_id, user_id, policy_id=policy_id, spec=spec)
+    finally:
+        active_ws_connections -= 1
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
+
+async def _ws_proxy(
+    ws: WebSocket,
+    session_id: str,
+    user_id: str,
+    policy_id: str = "default",
+    spec: Optional[dict] = None,
+):
     try:
         instance = await _resolve_instance(
             ws, user_id, policy_id=policy_id, spec=spec
@@ -543,9 +580,14 @@ async def _ws_proxy_handler(
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
-                instance = await _resolve_instance(
-                    ws, user_id, policy_id=policy_id, spec=spec
-                )
+                try:
+                    instance = await _resolve_instance(
+                        ws, user_id, policy_id=policy_id, spec=spec
+                    )
+                except Exception as resolve_err:
+                    logger.error("WS re-resolve for user {} failed: {}", user_id, resolve_err)
+                    await ws.close(code=4003, reason="Terminal instance not reachable")
+                    return
             else:
                 logger.error("WS connect to {} failed after {} retries: {}", upstream_url, max_retries, e)
                 await ws.close(code=4003, reason="Terminal instance not reachable")
@@ -585,12 +627,6 @@ async def _ws_proxy_handler(
             )
     except Exception as e:
         logger.error("WebSocket terminal proxy error: {}", e)
-    finally:
-        active_ws_connections -= 1
-        try:
-            await ws.close()
-        except Exception:
-            pass
 
 
 @router.websocket("/api/terminals/{session_id}")
