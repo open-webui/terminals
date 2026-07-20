@@ -6,7 +6,6 @@ import hashlib
 import logging
 import re
 import secrets
-import time
 from typing import Optional
 
 from kubernetes_asyncio import client, config
@@ -530,6 +529,8 @@ class KubernetesBackend(Backend):
             return
 
         recovered = 0
+        # The policy label holds a slug, so only DNS-safe policy ids resolve.
+        adopted_specs: dict[str, dict] = {}  # one lookup per distinct policy
         for pod in pods.items:
             if pod.status.phase not in ("Running", "Pending"):
                 continue
@@ -562,6 +563,9 @@ class KubernetesBackend(Backend):
                 log.debug("Pod %s has no API key secret, skipping", name)
                 continue
 
+            if policy_slug not in adopted_specs:
+                adopted_specs[policy_slug] = await self._resolve_adopted_spec(policy_slug)
+
             host = f"{name}.{ns}.svc.cluster.local"
             self._instances[key] = {
                 "instance_id": uid,
@@ -570,7 +574,8 @@ class KubernetesBackend(Backend):
                 "host": host,
                 "port": 8000,
             }
-            self._activity[key] = time.monotonic()
+            self._specs[key] = adopted_specs[policy_slug]
+            await self._seed_adopted_activity(key, user_id, policy_slug)
             recovered += 1
 
         if recovered:

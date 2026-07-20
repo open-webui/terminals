@@ -185,6 +185,46 @@ class Backend(ABC):
         await mark_terminal_active(user_id, policy_id)
         self._activity_synced_at[key] = time.monotonic()
 
+    async def _resolve_adopted_spec(self, policy_id: str) -> dict:
+        """Merged policy spec for an instance adopted by ``reconcile()``.
+
+        Returns ``{}`` when the policy can't be resolved (e.g. the implicit
+        "default" policy), matching a provision without a policy spec.
+        """
+        from fastapi import HTTPException
+
+        from terminals.routers.proxy import _resolve_policy_spec
+
+        try:
+            _, spec = await _resolve_policy_spec(policy_id)
+            return spec or {}
+        except HTTPException:
+            return {}
+        except Exception:
+            log.exception("Failed to resolve policy spec for %r", policy_id)
+            return {}
+
+    async def _seed_adopted_activity(
+        self, key: str, user_id: str, policy_id: str
+    ) -> None:
+        """Seed the idle clock for an adopted instance from the persisted
+        heartbeat, so a restart doesn't reset idle time already accrued.
+
+        Falls back to "now" when no heartbeat exists or the lookup fails.
+        """
+        self._record_activity(key)
+        try:
+            last_active = await terminal_last_active_at(user_id, policy_id)
+        except Exception:
+            log.exception("Failed to load persisted activity for %s", key)
+            return
+        if not last_active:
+            return
+        wall = last_active.replace(tzinfo=timezone.utc).timestamp()
+        if wall < self._activity_wall[key]:
+            self._activity_wall[key] = wall
+            self._activity[key] = time.monotonic() - (time.time() - wall)
+
     async def _apply_due_reset(
         self, user_id: str, policy_id: str, spec: Optional[dict]
     ) -> bool:
