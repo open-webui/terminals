@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] - 2026-07-20
+
+### Added
+- Added `TERMINALS_IDLE_CLEANUP_TIMEOUT_SECONDS` so deployments can choose how long idle cleanup waits for one terminal stop or reset before trying again later.
+
+### Changed
+- After a Terminals restart, recovered Docker and Kubernetes terminals now keep their policy settings instead of falling back to the global defaults.
+- After a Terminals restart, recovered terminals keep their last recorded activity time instead of being treated as newly active.
+- New Kubernetes terminal pods now save the real policy id, so recovered pods are matched to the right policy even when the policy label is shortened.
+
+### Fixed
+- Fixed idle cleanup getting stuck behind one slow terminal stop or reset. Timed-out cleanup is left tracked and retried on the next sweep.
+
 ## [0.0.7] - 2026-07-20
 
 ### Added
