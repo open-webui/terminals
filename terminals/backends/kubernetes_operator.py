@@ -28,6 +28,7 @@ from terminals.utils.kubernetes_security import (
     restricted_enabled,
 )
 from terminals.utils.kubernetes_scheduling import node_selector, tolerations
+from terminals.utils.policy_lifecycle import mark_terminal_active
 
 log = logging.getLogger(__name__)
 
@@ -262,6 +263,7 @@ class KubernetesOperatorBackend(Backend):
         self._activity.pop(key, None)
         self._activity_wall.pop(key, None)
         self._running_checked_at.pop(key, None)
+        self._activity_synced_at.pop(key, None)
         self._last_activity_status_updated_at.pop(key, None)
 
         api_client = await self._ensure_client()
@@ -551,6 +553,7 @@ class KubernetesOperatorBackend(Backend):
             self._activity.pop(key, None)
             self._activity_wall.pop(key, None)
             self._running_checked_at.pop(key, None)
+            self._activity_synced_at.pop(key, None)
             self._last_activity_status_updated_at.pop(key, None)
             result.refreshed += 1
 
@@ -833,6 +836,11 @@ class KubernetesOperatorBackend(Backend):
         key = self._key(user_id, policy_id)
         checked = self._last_activity_status_updated_at.get(key)
         self._record_activity(key)
+        synced = self._activity_synced_at.get(key)
+        interval = max(1, min(settings.status_cache_ttl or 30, 60))
+        if synced is None or time.monotonic() - synced >= interval:
+            await mark_terminal_active(user_id, policy_id)
+            self._activity_synced_at[key] = time.monotonic()
         if (
             settings.status_cache_ttl > 0
             and checked is not None

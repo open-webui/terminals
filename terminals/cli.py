@@ -23,12 +23,13 @@ BANNER = r"""
 @main.command()
 @click.option("--host", default=None, help="Bind host (overrides TERMINALS_HOST)")
 @click.option("--port", default=None, type=int, help="Bind port (overrides TERMINALS_PORT)")
+@click.option("--workers", default=None, type=int, help="Worker processes (overrides TERMINALS_WORKERS)")
 @click.option(
     "--api-key",
     default=None,
     help="Bearer API key (overrides TERMINALS_API_KEY)",
 )
-def serve(host: str | None, port: int | None, api_key: str | None):
+def serve(host: str | None, port: int | None, workers: int | None, api_key: str | None):
     """Start the orchestrator API server."""
     import os
     import secrets
@@ -39,6 +40,7 @@ def serve(host: str | None, port: int | None, api_key: str | None):
     # CLI flags take precedence over env/config.
     effective_host = host or settings.host
     effective_port = port or settings.port
+    effective_workers = workers or settings.workers
 
     if api_key is not None:
         os.environ["TERMINALS_API_KEY"] = api_key
@@ -64,6 +66,7 @@ def serve(host: str | None, port: int | None, api_key: str | None):
         log_level=normalize_log_level(settings.log_level).lower(),
         ws_per_message_deflate=settings.ws_compression,
         access_log=settings.access_log,
+        workers=effective_workers,
     )
 
 

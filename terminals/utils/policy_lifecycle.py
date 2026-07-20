@@ -12,6 +12,7 @@ from sqlalchemy import select
 from terminals.db.session import async_session
 
 RESET_KEY = "reset"
+ACTIVITY_KEY = "activity"
 
 
 def _utc_now() -> datetime:
@@ -226,6 +227,58 @@ async def mark_reset_applied(user_id: str, policy_id: str, spec: dict | None) ->
         data[RESET_KEY] = reset
         state.data = data
         await session.commit()
+
+
+async def mark_terminal_active(user_id: str, policy_id: str) -> None:
+    """Persist a cross-worker activity heartbeat for a terminal."""
+    if async_session is None:
+        return
+
+    now = _utc_now()
+
+    from terminals.models.policy import PolicyLifecycleState
+
+    async with async_session() as session:
+        state_row = await session.execute(
+            select(PolicyLifecycleState).where(
+                PolicyLifecycleState.user_id == user_id,
+                PolicyLifecycleState.policy_id == policy_id,
+            )
+        )
+        state = state_row.scalar_one_or_none()
+        if state is None:
+            state = PolicyLifecycleState(
+                id=f"{user_id}:{policy_id}",
+                user_id=user_id,
+                policy_id=policy_id,
+                data={},
+            )
+            session.add(state)
+
+        data = dict(state.data or {})
+        data[ACTIVITY_KEY] = {"last_seen_at": _iso(now)}
+        state.data = data
+        await session.commit()
+
+
+async def terminal_last_active_at(user_id: str, policy_id: str) -> datetime | None:
+    """Return the latest persisted activity heartbeat for a terminal."""
+    if async_session is None:
+        return None
+
+    from terminals.models.policy import PolicyLifecycleState
+
+    async with async_session() as session:
+        state_row = await session.execute(
+            select(PolicyLifecycleState).where(
+                PolicyLifecycleState.user_id == user_id,
+                PolicyLifecycleState.policy_id == policy_id,
+            )
+        )
+        state = state_row.scalar_one_or_none()
+        data = dict(state.data or {}) if state else {}
+        activity = dict(data.get(ACTIVITY_KEY) or {})
+        return _parse_iso(activity.get("last_seen_at"))
 
 
 async def get_lifecycle_data(policy_id: str) -> dict:

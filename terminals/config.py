@@ -3,7 +3,7 @@
 from typing import Any
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Root data directory lives next to the *package* directory so that the
@@ -32,12 +32,26 @@ class Settings(BaseSettings):
 
     port: int = 3000
     host: str = "0.0.0.0"
+    workers: int = 1
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     enable_ui: bool = True
     status_cache_ttl: int = 30
     token_cache_ttl: int = 60
     ws_compression: bool = False
     access_log: bool = False
+    replay_body_limit: int | None = None
+
+    @field_validator("replay_body_limit", mode="before")
+    @classmethod
+    def _parse_replay_body_limit(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip().lower() in {
+            "",
+            "none",
+            "null",
+            "unlimited",
+        }:
+            return None
+        return value
 
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"

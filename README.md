@@ -110,7 +110,7 @@ curl -X POST http://localhost:3000/p/data-science/execute \
 
 ### Policy lifecycle
 
-Policies define what gets provisioned. Policy lifecycle config defines ongoing maintenance for that policy, such as scheduled resets of persisted terminal files.
+Policies define what gets provisioned. Policy lifecycle config defines ongoing maintenance for that policy, such as scheduled resets of persisted terminal files. Due resets refresh matching terminals even when they are still running, so long-lived browser sessions do not block scheduled cleanup.
 
 ```bash
 curl -X PUT http://localhost:3000/api/v1/policies/data-science/lifecycle \
@@ -151,6 +151,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 |----------|---------|-------------|
 | `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-operator` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
+| `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
 | `TERMINALS_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per container |
@@ -164,13 +165,16 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_KUBERNETES_NODE_SELECTOR` | | Node selector for Kubernetes terminal and reset pods, as JSON or `k=v,k2=v2` |
 | `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of Kubernetes tolerations for terminal and reset pods |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
-| `TERMINALS_LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
 | `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. The cache is invalidated immediately when a proxied connection fails. |
 | `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only), avoiding one Open WebUI round trip per proxied request. A revoked token stays usable for up to the TTL; `0` validates every request. |
 | `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links — per-frame compression is CPU-expensive at high session counts. |
 | `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default: at high request rates the per-request log record is measurable CPU. |
+| `TERMINALS_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. When set, larger known-size request bodies are streamed one-shot instead of buffered in orchestrator memory. |
 
 See [`config.py`](terminals/config.py) for the full list.
+
+By default, known-size proxied request bodies are buffered so retry behavior is preserved. Set `TERMINALS_REPLAY_BODY_LIMIT` to stream request bodies above that byte limit instead of buffering them in orchestrator memory. Chunked uploads are always streamed one-shot and are not retried.
 
 ## Authentication
 

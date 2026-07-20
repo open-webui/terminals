@@ -154,21 +154,34 @@ async def _proxy_request(
     for h in ("host", "transfer-encoding", "connection", "x-user-id"):
         headers.pop(h, None)
 
-    # Read the request body upfront (needed for retries).
-    body = await request.body()
+    raw_content_length = request.headers.get("content-length")
+    try:
+        content_length = int(raw_content_length) if raw_content_length else None
+    except ValueError:
+        content_length = None
+    stream_body = (
+        (
+            settings.replay_body_limit is not None
+            and content_length is not None
+            and content_length > settings.replay_body_limit
+        )
+        or request.headers.get("transfer-encoding") is not None
+    )
+    body = None if stream_body else await request.body()
 
     client = await _get_proxy_client(instance.host, instance.port)
 
     # Retry on connection errors — the container may still be starting.
-    max_retries = 5
+    max_retries = 1 if stream_body else 5
     for attempt in range(max_retries):
         try:
+            content = request.stream() if stream_body else body
             upstream_resp = await client.send(
                 client.build_request(
                     method=request.method,
                     url=target_url,
                     headers=headers,
-                    content=body,
+                    content=content,
                 ),
                 stream=True,
             )
