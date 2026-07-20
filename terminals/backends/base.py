@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from terminals.config import settings
-from terminals.utils.policy_lifecycle import mark_reset_applied, reset_due_for
+from terminals.utils.policy_lifecycle import (
+    mark_reset_applied,
+    mark_terminal_active,
+    reset_due_for,
+    terminal_last_active_at,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ class Backend(ABC):
         self._specs: dict[str, dict] = {}           # → resolved policy spec
         self._locks: dict[str, asyncio.Lock] = {}   # → per-key provisioning lock
         self._running_checked_at: dict[str, float] = {}
+        self._activity_synced_at: dict[str, float] = {}
         self._reaper_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -151,6 +157,7 @@ class Backend(ABC):
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
                 self._running_checked_at.pop(key, None)
+                self._activity_synced_at.pop(key, None)
 
             await self._apply_due_reset(user_id, policy_id, spec)
             result = await self.provision(user_id, policy_id=policy_id, spec=spec)
@@ -171,6 +178,12 @@ class Backend(ABC):
         """Record that *user_id*'s terminal is actively being used."""
         key = self._key(user_id, policy_id)
         self._record_activity(key)
+        checked = self._activity_synced_at.get(key)
+        interval = max(1, min(settings.status_cache_ttl or 30, 60))
+        if checked is not None and time.monotonic() - checked < interval:
+            return
+        await mark_terminal_active(user_id, policy_id)
+        self._activity_synced_at[key] = time.monotonic()
 
     async def _apply_due_reset(
         self, user_id: str, policy_id: str, spec: Optional[dict]
@@ -235,6 +248,7 @@ class Backend(ABC):
             self._activity.pop(key, None)
             self._activity_wall.pop(key, None)
             self._running_checked_at.pop(key, None)
+            self._activity_synced_at.pop(key, None)
             self._locks.pop(key, None)
             result.refreshed += 1
 
@@ -319,19 +333,51 @@ class Backend(ABC):
                 continue
 
             spec = self._specs.get(key, {})
+            user_id, policy_id = key.split(":", 1)
+            if await reset_due_for(user_id, policy_id, spec):
+                log.info(
+                    "Refreshing terminal %s for due reset (user=%s, policy=%s)",
+                    info.get("instance_name", info.get("instance_id")),
+                    user_id,
+                    policy_id,
+                )
+                try:
+                    await self.teardown(info["instance_id"])
+                except Exception:
+                    log.exception("Failed to tear down %s for scheduled reset", key)
+                try:
+                    await self.reset(user_id, policy_id, spec)
+                    await mark_reset_applied(user_id, policy_id, spec)
+                except NotImplementedError:
+                    log.warning("Reset due for %s but backend does not support it", key)
+                except Exception:
+                    log.exception("Failed to reset files for %s", key)
+                self._instances.pop(key, None)
+                self._specs.pop(key, None)
+                self._activity.pop(key, None)
+                self._activity_wall.pop(key, None)
+                self._running_checked_at.pop(key, None)
+                self._activity_synced_at.pop(key, None)
+                self._locks.pop(key, None)
+                continue
+
             timeout_min = spec.get(
                 "idle_timeout_minutes", settings.idle_timeout_minutes
             )
             if not timeout_min or timeout_min <= 0:
                 continue
 
+            shared_last_active = await terminal_last_active_at(user_id, policy_id)
+            if shared_last_active:
+                shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
+                if shared_wall > self._activity_wall.get(key, 0):
+                    self._activity_wall[key] = shared_wall
+                    self._activity[key] = now
+
             last_active = self._activity.get(key, now)
             idle_seconds = now - last_active
 
             if idle_seconds >= timeout_min * 60:
-                parts = key.split(":", 1)
-                user_id = parts[0]
-                policy_id = parts[1] if len(parts) > 1 else "default"
                 log.info(
                     "Reaping idle terminal %s (user=%s, policy=%s, idle=%.0fs, timeout=%dm)",
                     info.get("instance_name", info.get("instance_id")),
@@ -355,4 +401,5 @@ class Backend(ABC):
                 self._activity.pop(key, None)
                 self._activity_wall.pop(key, None)
                 self._running_checked_at.pop(key, None)
+                self._activity_synced_at.pop(key, None)
                 self._locks.pop(key, None)

@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 # Container name prefix used for discovery during reconciliation.
 _CONTAINER_PREFIX = "terminals-"
 _DNS_SAFE = re.compile(r"[^a-z0-9-]")
+_QUIET_LOG_LEVELS = {"WARNING", "ERROR", "CRITICAL"}
 
 
 class DockerBackend(Backend):
@@ -68,6 +69,8 @@ class DockerBackend(Backend):
             "Binds": [f"{host_data_dir}:/home/user"],
             "PublishAllPorts": True,
         }
+        if (settings.log_level or "").strip().upper() in _QUIET_LOG_LEVELS:
+            host_config["LogConfig"] = {"Type": "none"}
 
         # Resources
         if s.get("memory_limit"):
@@ -121,25 +124,32 @@ class DockerBackend(Backend):
         log.info("Provisioning container %s for user %s (policy=%s)", instance_name, user_id, policy_id)
 
         max_conflict_retries = 3
+        container = None
         for attempt in range(max_conflict_retries + 1):
             try:
-                container = await docker.containers.create_or_replace(
-                    name=instance_name,
-                    config=config,
-                )
+                container = await docker.containers.create(config, name=instance_name)
                 await container.start()
                 break
             except aiodocker.exceptions.DockerError as exc:
                 if exc.status == 409 and attempt < max_conflict_retries:
-                    log.warning(
-                        "Container %s conflict (attempt %d/%d), force-removing and retrying",
-                        instance_name, attempt + 1, max_conflict_retries,
-                    )
                     try:
                         old = await docker.containers.get(instance_name)
+                        old_info = await old.show()
+                        if old_info.get("State", {}).get("Running"):
+                            for entry in old_info.get("Config", {}).get("Env", []):
+                                if entry.startswith("OPEN_TERMINAL_API_KEY="):
+                                    api_key = entry.split("=", 1)[1]
+                                    break
+                            container = old
+                            log.info("Adopted running container %s", instance_name)
+                            break
+                        log.warning(
+                            "Container %s conflict (attempt %d/%d), removing stopped container",
+                            instance_name, attempt + 1, max_conflict_retries,
+                        )
                         await old.delete(force=True)
-                    except aiodocker.exceptions.DockerError:
-                        pass
+                    except aiodocker.exceptions.DockerError as adopt_exc:
+                        log.warning("Could not adopt/remove %s: %s", instance_name, adopt_exc)
                     await asyncio.sleep(1)
                     continue
                 # The storage driver may not support StorageOpt size quotas
@@ -157,6 +167,9 @@ class DockerBackend(Backend):
                     continue
                 log.error("Failed to provision container for %s: %s", user_id, exc)
                 raise
+
+        if container is None:
+            raise RuntimeError(f"Failed to provision or adopt container {instance_name}")
 
         result = await self._extract_instance_info(container, instance_name, api_key)
         await self._wait_until_ready(result, timeout=15)
@@ -252,10 +265,8 @@ class DockerBackend(Backend):
             if key in self._instances:
                 continue
 
-            # Extract API key from container env
-            env_list = info.get("Config", {}).get("Env", [])
             api_key = ""
-            for entry in env_list:
+            for entry in info.get("Config", {}).get("Env", []):
                 if entry.startswith("OPEN_TERMINAL_API_KEY="):
                     api_key = entry.split("=", 1)[1]
                     break
@@ -263,6 +274,7 @@ class DockerBackend(Backend):
             instance_info = await self._extract_instance_info(container, name, api_key)
             self._instances[key] = instance_info
             self._activity[key] = time.monotonic()
+            self._activity_wall[key] = time.time()
             recovered += 1
             log.info("Reconciled container %s → %s:%s", name, instance_info["host"], instance_info["port"])
 
