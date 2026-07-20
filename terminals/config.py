@@ -74,6 +74,8 @@ class Settings(BaseSettings):
 
     # Idle reaper — tear down terminals after N minutes of inactivity (0 = disabled)
     idle_timeout_minutes: int = 0
+    reaper_concurrency: int = 8              # max concurrent reaps per sweep
+    reaper_op_timeout_seconds: float = 120   # per teardown/reset call
 
     # Policy hard caps (cannot be exceeded by API)
     max_cpu: str = ""              # TERMINALS_MAX_CPU

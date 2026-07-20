@@ -324,82 +324,142 @@ class Backend(ABC):
                 log.exception("Idle reaper error")
 
     async def _reap_idle(self) -> None:
-        """Scan tracked instances and tear down any that exceeded their timeout."""
+        """Apply due resets and tear down idle instances across the fleet.
+
+        Instances are processed concurrently with per-operation timeouts so
+        one slow or hung backend call can't stall the whole sweep.
+        """
+        keys = list(self._instances)
+        if not keys:
+            return
+
+        semaphore = asyncio.Semaphore(max(1, settings.reaper_concurrency))
+
+        async def _reap_one(key: str) -> None:
+            async with semaphore:
+                await self._reap_instance(key)
+
+        results = await asyncio.gather(
+            *(_reap_one(key) for key in keys), return_exceptions=True
+        )
+        for key, result in zip(keys, results):
+            if isinstance(result, BaseException):
+                log.error("Reaper task for %s failed: %r", key, result)
+
+    async def _reap_instance(self, key: str) -> None:
+        """Apply a due reset or idle-timeout teardown for one tracked instance."""
+        info = self._instances.get(key)
+        if info is None:
+            return
+
         now = time.monotonic()
+        op_timeout = settings.reaper_op_timeout_seconds
+        spec = self._specs.get(key, {})
+        user_id, policy_id = key.split(":", 1)
 
-        for key in list(self._instances):
-            info = self._instances.get(key)
-            if info is None:
-                continue
-
-            spec = self._specs.get(key, {})
-            user_id, policy_id = key.split(":", 1)
-            if await reset_due_for(user_id, policy_id, spec):
-                log.info(
-                    "Refreshing terminal %s for due reset (user=%s, policy=%s)",
-                    info.get("instance_name", info.get("instance_id")),
-                    user_id,
-                    policy_id,
-                )
-                try:
-                    await self.teardown(info["instance_id"])
-                except Exception:
-                    log.exception("Failed to tear down %s for scheduled reset", key)
-                try:
-                    await self.reset(user_id, policy_id, spec)
-                    await mark_reset_applied(user_id, policy_id, spec)
-                except NotImplementedError:
-                    log.warning("Reset due for %s but backend does not support it", key)
-                except Exception:
-                    log.exception("Failed to reset files for %s", key)
-                self._instances.pop(key, None)
-                self._specs.pop(key, None)
-                self._activity.pop(key, None)
-                self._activity_wall.pop(key, None)
-                self._running_checked_at.pop(key, None)
-                self._activity_synced_at.pop(key, None)
-                self._locks.pop(key, None)
-                continue
-
-            timeout_min = spec.get(
-                "idle_timeout_minutes", settings.idle_timeout_minutes
+        try:
+            reset_due = await asyncio.wait_for(
+                reset_due_for(user_id, policy_id, spec), op_timeout
             )
-            if not timeout_min or timeout_min <= 0:
-                continue
+        except Exception:
+            log.exception("Failed to check due reset for %s", key)
+            return
 
-            shared_last_active = await terminal_last_active_at(user_id, policy_id)
-            if shared_last_active:
-                shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
-                if shared_wall > self._activity_wall.get(key, 0):
-                    self._activity_wall[key] = shared_wall
-                    self._activity[key] = now
-
-            last_active = self._activity.get(key, now)
-            idle_seconds = now - last_active
-
-            if idle_seconds >= timeout_min * 60:
-                log.info(
-                    "Reaping idle terminal %s (user=%s, policy=%s, idle=%.0fs, timeout=%dm)",
-                    info.get("instance_name", info.get("instance_id")),
-                    user_id,
-                    policy_id,
-                    idle_seconds,
-                    timeout_min,
+        if reset_due:
+            log.info(
+                "Refreshing terminal %s for due reset (user=%s, policy=%s)",
+                info.get("instance_name", info.get("instance_id")),
+                user_id,
+                policy_id,
+            )
+            try:
+                await asyncio.wait_for(self.teardown(info["instance_id"]), op_timeout)
+            except asyncio.TimeoutError:
+                # State unknown — keep tracked so the next sweep retries.
+                log.error(
+                    "Teardown of %s timed out after %.0fs; will retry next sweep",
+                    key, op_timeout,
                 )
-                try:
-                    await self.teardown(info["instance_id"])
-                except Exception:
-                    log.exception("Failed to tear down %s", key)
-                try:
-                    await self._apply_due_reset(user_id, policy_id, spec)
-                except NotImplementedError:
-                    log.warning("Reset due for %s but backend does not support it", key)
-                except Exception:
-                    log.exception("Failed to reset files for %s", key)
-                self._instances.pop(key, None)
-                self._specs.pop(key, None)
-                self._activity.pop(key, None)
-                self._activity_wall.pop(key, None)
-                self._running_checked_at.pop(key, None)
-                self._activity_synced_at.pop(key, None)
-                self._locks.pop(key, None)
+                return
+            except Exception:
+                log.exception("Failed to tear down %s for scheduled reset", key)
+            try:
+                await asyncio.wait_for(self.reset(user_id, policy_id, spec), op_timeout)
+                await asyncio.wait_for(
+                    mark_reset_applied(user_id, policy_id, spec), op_timeout
+                )
+            except NotImplementedError:
+                log.warning("Reset due for %s but backend does not support it", key)
+            except asyncio.TimeoutError:
+                log.error("Reset for %s timed out after %.0fs", key, op_timeout)
+            except Exception:
+                log.exception("Failed to reset files for %s", key)
+            self._instances.pop(key, None)
+            self._specs.pop(key, None)
+            self._activity.pop(key, None)
+            self._activity_wall.pop(key, None)
+            self._running_checked_at.pop(key, None)
+            self._activity_synced_at.pop(key, None)
+            self._locks.pop(key, None)
+            return
+
+        timeout_min = spec.get(
+            "idle_timeout_minutes", settings.idle_timeout_minutes
+        )
+        if not timeout_min or timeout_min <= 0:
+            return
+
+        try:
+            shared_last_active = await asyncio.wait_for(
+                terminal_last_active_at(user_id, policy_id), op_timeout
+            )
+        except Exception:
+            log.exception("Failed to load persisted activity for %s", key)
+            shared_last_active = None
+        if shared_last_active:
+            shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
+            if shared_wall > self._activity_wall.get(key, 0):
+                self._activity_wall[key] = shared_wall
+                self._activity[key] = now
+
+        last_active = self._activity.get(key, now)
+        idle_seconds = now - last_active
+        if idle_seconds < timeout_min * 60:
+            return
+
+        log.info(
+            "Reaping idle terminal %s (user=%s, policy=%s, idle=%.0fs, timeout=%dm)",
+            info.get("instance_name", info.get("instance_id")),
+            user_id,
+            policy_id,
+            idle_seconds,
+            timeout_min,
+        )
+        try:
+            await asyncio.wait_for(self.teardown(info["instance_id"]), op_timeout)
+        except asyncio.TimeoutError:
+            # State unknown — keep tracked so the next sweep retries.
+            log.error(
+                "Teardown of %s timed out after %.0fs; will retry next sweep",
+                key, op_timeout,
+            )
+            return
+        except Exception:
+            log.exception("Failed to tear down %s", key)
+        try:
+            await asyncio.wait_for(
+                self._apply_due_reset(user_id, policy_id, spec), op_timeout
+            )
+        except NotImplementedError:
+            log.warning("Reset due for %s but backend does not support it", key)
+        except asyncio.TimeoutError:
+            log.error("Reset for %s timed out after %.0fs", key, op_timeout)
+        except Exception:
+            log.exception("Failed to reset files for %s", key)
+        self._instances.pop(key, None)
+        self._specs.pop(key, None)
+        self._activity.pop(key, None)
+        self._activity_wall.pop(key, None)
+        self._running_checked_at.pop(key, None)
+        self._activity_synced_at.pop(key, None)
+        self._locks.pop(key, None)

@@ -164,6 +164,8 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into Kubernetes terminal containers |
 | `TERMINALS_KUBERNETES_NODE_SELECTOR` | | Node selector for Kubernetes terminal and reset pods, as JSON or `k=v,k2=v2` |
 | `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of Kubernetes tolerations for terminal and reset pods |
+| `TERMINALS_REAPER_CONCURRENCY` | `8` | Max instances the idle reaper tears down concurrently per sweep |
+| `TERMINALS_REAPER_OP_TIMEOUT_SECONDS` | `120` | Timeout for each teardown/reset call during a reaper sweep |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
 | `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. The cache is invalidated immediately when a proxied connection fails. |
