@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from terminals.config import settings
+from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
 from terminals.routers.auth import validate_token, verify_api_key, verify_user_id
 
 router = APIRouter()
@@ -390,26 +391,12 @@ async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
     if cached and (now - cached[0]) < _POLICY_CACHE_TTL:
         return cached[1]
 
-    from terminals.db.session import async_session as db_session
-
-    if db_session is None:
-        result = (policy_id, None)
-        _policy_cache[policy_id] = (now, result)
-        return result
-
-    from terminals.models.policy import Policy
-    from terminals.routers.policy import _merge_defaults
-
-    async with db_session() as session:
-        from sqlalchemy import select
-        row = await session.execute(select(Policy).where(Policy.id == policy_id))
-        policy = row.scalar_one_or_none()
-        if policy is None:
-            raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
-
-        result = (policy_id, _merge_defaults(policy.data or {}))
-        _policy_cache[policy_id] = (now, result)
-        return result
+    try:
+        result = await resolve_policy_spec(policy_id)
+    except PolicyNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+    _policy_cache[policy_id] = (now, result)
+    return result
 
 
 @router.get(

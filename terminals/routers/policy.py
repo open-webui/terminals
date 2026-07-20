@@ -14,6 +14,7 @@ from terminals.utils.policy_lifecycle import (
     upsert_lifecycle_data,
     validate_lifecycle_data,
 )
+from terminals.utils.policy_specs import merge_policy_defaults
 from terminals.utils.kubernetes_security import (
     restricted_enabled,
     restricted_env_errors,
@@ -130,10 +131,7 @@ def _validate_lifecycle(data: dict) -> dict:
 
 def _merge_defaults(policy_data: dict) -> dict:
     """Merge env var defaults with policy overrides."""
-    defaults = {}
-    if settings.image:
-        defaults["image"] = settings.image
-    return {**defaults, **{k: v for k, v in policy_data.items() if v is not None}}
+    return merge_policy_defaults(policy_data)
 
 
 # ---------------------------------------------------------------------------

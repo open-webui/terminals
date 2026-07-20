@@ -15,6 +15,7 @@ from terminals.utils.policy_lifecycle import (
     reset_due_for,
     terminal_last_active_at,
 )
+from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +186,34 @@ class Backend(ABC):
         await mark_terminal_active(user_id, policy_id)
         self._activity_synced_at[key] = time.monotonic()
 
+    async def _adopted_spec(self, policy_id: str) -> dict:
+        """Best-effort resolved spec for instances adopted during startup."""
+        try:
+            _, spec = await resolve_policy_spec(policy_id)
+            return spec or {}
+        except PolicyNotFoundError:
+            return {}
+        except Exception:
+            log.exception("Failed to resolve policy spec for %r", policy_id)
+            return {}
+
+    async def _seed_adopted_activity(
+        self, key: str, user_id: str, policy_id: str
+    ) -> None:
+        """Preserve persisted idle time when adopting an existing instance."""
+        self._record_activity(key)
+        try:
+            last_active = await terminal_last_active_at(user_id, policy_id)
+        except Exception:
+            log.exception("Failed to load persisted activity for %s", key)
+            return
+        if not last_active:
+            return
+        wall = last_active.replace(tzinfo=timezone.utc).timestamp()
+        if wall < self._activity_wall[key]:
+            self._activity_wall[key] = wall
+            self._activity[key] = time.monotonic() - (time.time() - wall)
+
     async def _apply_due_reset(
         self, user_id: str, policy_id: str, spec: Optional[dict]
     ) -> bool:
@@ -334,6 +363,7 @@ class Backend(ABC):
 
             spec = self._specs.get(key, {})
             user_id, policy_id = key.split(":", 1)
+            cleanup_timeout = settings.idle_cleanup_timeout_seconds
             if await reset_due_for(user_id, policy_id, spec):
                 log.info(
                     "Refreshing terminal %s for due reset (user=%s, policy=%s)",
@@ -342,14 +372,31 @@ class Backend(ABC):
                     policy_id,
                 )
                 try:
-                    await self.teardown(info["instance_id"])
+                    await asyncio.wait_for(
+                        self.teardown(info["instance_id"]), cleanup_timeout
+                    )
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Teardown of %s timed out after %.0fs; will retry next sweep",
+                        key,
+                        cleanup_timeout,
+                    )
+                    continue
                 except Exception:
                     log.exception("Failed to tear down %s for scheduled reset", key)
                 try:
-                    await self.reset(user_id, policy_id, spec)
-                    await mark_reset_applied(user_id, policy_id, spec)
+                    await asyncio.wait_for(
+                        self.reset(user_id, policy_id, spec), cleanup_timeout
+                    )
+                    await asyncio.wait_for(
+                        mark_reset_applied(user_id, policy_id, spec), cleanup_timeout
+                    )
                 except NotImplementedError:
                     log.warning("Reset due for %s but backend does not support it", key)
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Reset for %s timed out after %.0fs", key, cleanup_timeout
+                    )
                 except Exception:
                     log.exception("Failed to reset files for %s", key)
                 self._instances.pop(key, None)
@@ -387,13 +434,29 @@ class Backend(ABC):
                     timeout_min,
                 )
                 try:
-                    await self.teardown(info["instance_id"])
+                    await asyncio.wait_for(
+                        self.teardown(info["instance_id"]), cleanup_timeout
+                    )
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Teardown of %s timed out after %.0fs; will retry next sweep",
+                        key,
+                        cleanup_timeout,
+                    )
+                    continue
                 except Exception:
                     log.exception("Failed to tear down %s", key)
                 try:
-                    await self._apply_due_reset(user_id, policy_id, spec)
+                    await asyncio.wait_for(
+                        self._apply_due_reset(user_id, policy_id, spec),
+                        cleanup_timeout,
+                    )
                 except NotImplementedError:
                     log.warning("Reset due for %s but backend does not support it", key)
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Reset for %s timed out after %.0fs", key, cleanup_timeout
+                    )
                 except Exception:
                     log.exception("Failed to reset files for %s", key)
                 self._instances.pop(key, None)

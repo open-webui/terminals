@@ -6,7 +6,6 @@ import hashlib
 import logging
 import re
 import secrets
-import time
 from typing import Optional
 
 from kubernetes_asyncio import client, config
@@ -29,6 +28,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DNS_SAFE = re.compile(r"[^a-z0-9-]")
+_POLICY_ID_ANNOTATION = "openwebui.com/policy-id"
 
 
 def _sanitize_name(user_id: str, policy_id: str = "default") -> str:
@@ -103,6 +103,7 @@ class KubernetesBackend(Backend):
         ns = settings.kubernetes_namespace
         labels = _base_labels(user_id)
         labels["openwebui.com/policy"] = policy_slug
+        annotations = {_POLICY_ID_ANNOTATION: policy_id}
 
         image = s.get("image", settings.kubernetes_image)
         storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
@@ -249,7 +250,12 @@ class KubernetesBackend(Backend):
 
         # ---- Pod ---------------------------------------------------------
         pod = client.V1Pod(
-            metadata=client.V1ObjectMeta(name=name, namespace=ns, labels=labels),
+            metadata=client.V1ObjectMeta(
+                name=name,
+                namespace=ns,
+                labels=labels,
+                annotations=annotations,
+            ),
             spec=client.V1PodSpec(
                 containers=[
                     client.V1Container(
@@ -530,13 +536,16 @@ class KubernetesBackend(Backend):
             return
 
         recovered = 0
+        adopted_specs: dict[str, dict] = {}
         for pod in pods.items:
             if pod.status.phase not in ("Running", "Pending"):
                 continue
 
             labels = pod.metadata.labels or {}
+            annotations = pod.metadata.annotations or {}
             user_id = labels.get("openwebui.com/user-id")
             policy_slug = labels.get("openwebui.com/policy", "default")
+            policy_id = annotations.get(_POLICY_ID_ANNOTATION, policy_slug)
             if not user_id:
                 continue
 
@@ -544,7 +553,7 @@ class KubernetesBackend(Backend):
             name = pod.metadata.name
             self._uid_cache[uid] = name
 
-            key = self._key(user_id, policy_slug)
+            key = self._key(user_id, policy_id)
             if key in self._instances:
                 continue
 
@@ -563,6 +572,8 @@ class KubernetesBackend(Backend):
                 continue
 
             host = f"{name}.{ns}.svc.cluster.local"
+            if policy_id not in adopted_specs:
+                adopted_specs[policy_id] = await self._adopted_spec(policy_id)
             self._instances[key] = {
                 "instance_id": uid,
                 "instance_name": name,
@@ -570,7 +581,8 @@ class KubernetesBackend(Backend):
                 "host": host,
                 "port": 8000,
             }
-            self._activity[key] = time.monotonic()
+            self._specs[key] = adopted_specs[policy_id]
+            await self._seed_adopted_activity(key, user_id, policy_id)
             recovered += 1
 
         if recovered:
