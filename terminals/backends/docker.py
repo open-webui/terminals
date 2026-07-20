@@ -6,7 +6,6 @@ import logging
 import re
 import secrets
 import shutil
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -248,6 +247,7 @@ class DockerBackend(Backend):
         )
 
         recovered = 0
+        adopted_specs: dict[str, dict] = {}
         for container in containers:
             info = await container.show()
             name = info.get("Name", "").lstrip("/")
@@ -272,9 +272,11 @@ class DockerBackend(Backend):
                     break
 
             instance_info = await self._extract_instance_info(container, name, api_key)
+            if policy_id not in adopted_specs:
+                adopted_specs[policy_id] = await self._adopted_spec(policy_id)
             self._instances[key] = instance_info
-            self._activity[key] = time.monotonic()
-            self._activity_wall[key] = time.time()
+            self._specs[key] = adopted_specs[policy_id]
+            await self._seed_adopted_activity(key, user_id, policy_id)
             recovered += 1
             log.info("Reconciled container %s → %s:%s", name, instance_info["host"], instance_info["port"])
 
