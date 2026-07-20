@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] - 2026-07-20
+
+### Added
+- Added `TERMINALS_WORKERS` and `--workers` so deployments can run more than one server process.
+- Added `TERMINALS_REPLAY_BODY_LIMIT`. By default, normal request bodies stay retryable with no size cap; set a byte limit to stream larger uploads instead of holding them in memory.
+
+### Changed
+- Docker mode now reuses an already-running per-user container when another worker finds it, instead of deleting and replacing it during a name conflict.
+- Docker child container logs are turned off when `TERMINALS_LOG_LEVEL` is `WARNING`, `ERROR`, or `CRITICAL`, reducing log noise from hosted terminals.
+- Activity is now shared between workers, so one worker is less likely to clean up a terminal that another worker is actively serving.
+- Scheduled policy resets now refresh matching running terminals too, so long-lived browser sessions do not leave old files in place after a reset is due.
+- Kubernetes operator deployments now avoid writing activity updates on every request while still keeping terminals marked active.
+
+### Fixed
+- Fixed large proxied requests so known-size bodies remain retryable by default, while chunked uploads are handled as one-shot streams.
+- Fixed Docker startup conflicts in multi-worker deployments where workers could fight over the same deterministic container name.
+- Fixed activity cleanup bookkeeping after refreshes, resets, missing instances, and reconciled Docker containers.
+
 ## [0.0.6] - 2026-07-19
 
 ### Added
