@@ -180,9 +180,7 @@ By default, known-size proxied request bodies are buffered so retry behavior is 
 
 ### Docker bridge scaling
 
-Docker bridge networks have a practical ceiling of about 1000 connected containers per bridge. Near that limit Docker may fail terminal startup with errors such as `exchange full`. For larger single-node Docker deployments, create multiple bridge networks and set `TERMINALS_NETWORK` to a comma-separated list; Terminals assigns each user/policy terminal to a stable network shard. The orchestrator container must be attached to every listed network so it can reach terminals by container name.
-
-For sustained high concurrency, prefer a Kubernetes backend.
+Docker documents that bridge networks can become unstable when 1000 or more containers connect to a single network. For larger single-node Docker deployments, create multiple bridge networks and set `TERMINALS_NETWORK` to a comma-separated list; Terminals assigns each user/policy terminal to a stable network shard. The orchestrator container must be attached to every listed network so it can reach terminals by container name.
 
 ## Authentication
 
