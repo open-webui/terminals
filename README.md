@@ -154,6 +154,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
 | `TERMINALS_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
+| `TERMINALS_NETWORK` | | Docker network for terminal containers. Use a comma-separated list to shard terminals across multiple Docker bridge networks. |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per container |
 | `TERMINALS_MAX_MEMORY` | | Hard cap on memory per container |
 | `TERMINALS_MAX_STORAGE` | | Hard cap on storage per container |
@@ -176,6 +177,12 @@ All settings are configured through environment variables prefixed with `TERMINA
 See [`config.py`](terminals/config.py) for the full list.
 
 By default, known-size proxied request bodies are buffered so retry behavior is preserved. Set `TERMINALS_REPLAY_BODY_LIMIT` to stream request bodies above that byte limit instead of buffering them in orchestrator memory. Chunked uploads are always streamed one-shot and are not retried.
+
+### Docker bridge scaling
+
+Docker bridge networks have a practical ceiling of about 1000 connected containers per bridge. Near that limit Docker may fail terminal startup with errors such as `exchange full`. For larger single-node Docker deployments, create multiple bridge networks and set `TERMINALS_NETWORK` to a comma-separated list; Terminals assigns each user/policy terminal to a stable network shard. The orchestrator container must be attached to every listed network so it can reach terminals by container name.
+
+For sustained high concurrency, prefer a Kubernetes backend.
 
 ## Authentication
 
