@@ -124,7 +124,6 @@ class DockerBackend(Backend):
                 "app.kubernetes.io/managed-by": "terminals",
                 "openwebui.com/user-id": user_id,
                 "openwebui.com/policy": policy_id,
-                "openwebui.com/network": network_name or "",
             },
         }
 
