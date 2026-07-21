@@ -63,6 +63,13 @@ class DockerBackend(Backend):
         s = spec or {}
 
         image = s.get("image", settings.image)
+        networks = [name.strip() for name in settings.network.split(",") if name.strip()]
+        network_name = None
+        if len(networks) == 1:
+            network_name = networks[0]
+        elif networks:
+            key = f"{policy_id}:{user_id}".encode()
+            network_name = networks[int(hashlib.sha256(key).hexdigest(), 16) % len(networks)]
 
         host_config: dict = {
             "Binds": [f"{host_data_dir}:/home/user"],
@@ -100,8 +107,8 @@ class DockerBackend(Backend):
         )
         if "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env:
             host_config["CapAdd"] = ["NET_ADMIN"]
-        if settings.network:
-            host_config["NetworkMode"] = settings.network
+        if network_name:
+            host_config["NetworkMode"] = network_name
 
         # Env vars
         env = [f"OPEN_TERMINAL_API_KEY={api_key}"]
@@ -117,10 +124,17 @@ class DockerBackend(Backend):
                 "app.kubernetes.io/managed-by": "terminals",
                 "openwebui.com/user-id": user_id,
                 "openwebui.com/policy": policy_id,
+                "openwebui.com/network": network_name or "",
             },
         }
 
-        log.info("Provisioning container %s for user %s (policy=%s)", instance_name, user_id, policy_id)
+        log.info(
+            "Provisioning container %s for user %s (policy=%s, network=%s)",
+            instance_name,
+            user_id,
+            policy_id,
+            network_name or "default",
+        )
 
         max_conflict_retries = 3
         container = None
