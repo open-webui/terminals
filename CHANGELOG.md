@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-07-21
 
 ### Added
-- Docker deployments can now spread terminal containers across multiple Docker networks by setting `TERMINALS_NETWORK` to a comma-separated list, so large single-node installs do not have to put every active terminal on one bridge.
-- Documented the Docker bridge scaling limit and the exact `TERMINALS_NETWORK` setup needed for multi-network deployments.
+- Large Docker installs can now split terminals across several Docker networks by setting `TERMINALS_NETWORK` to a comma-separated list, so every active terminal no longer has to sit on the same network.
+- The README now gives the exact setup for this: create multiple Docker networks, list them in `TERMINALS_NETWORK`, and attach the orchestrator to each one.
 
 ## [0.0.8] - 2026-07-20
 
