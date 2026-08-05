@@ -14,6 +14,14 @@ import httpx
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.context import (
+    CONTEXT_HASH_LABEL,
+    CONTEXT_ID_ANNOTATION,
+    CONTEXT_TYPE_LABEL,
+    DEFAULT_CONTEXT_ID,
+    context_hash,
+    normalize_context_id,
+)
 from terminals.utils.env import build_terminal_env
 from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
 
@@ -38,13 +46,27 @@ class DockerBackend(Backend):
         return self._docker
 
     @staticmethod
-    def _container_name(policy_id: str, user_id: str) -> str:
+    def _container_name(
+        policy_id: str, user_id: str, context_id: str = DEFAULT_CONTEXT_ID
+    ) -> str:
         """Build a deterministic, DNS-safe container name (≤63 chars)."""
         short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+        context_id = normalize_context_id(context_id)
         if policy_id == "default":
-            return f"{_CONTAINER_PREFIX}{short}"
-        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-        return f"{_CONTAINER_PREFIX}{short}-{policy_slug}"
+            name = f"{_CONTAINER_PREFIX}{short}"
+        else:
+            policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+            name = f"{_CONTAINER_PREFIX}{short}-{policy_slug}"
+        if context_id != DEFAULT_CONTEXT_ID:
+            name = f"{name}-{context_hash(context_id)}"
+        return name
+
+    @staticmethod
+    def _home_dir(user_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> Path:
+        context_id = normalize_context_id(context_id)
+        if context_id == DEFAULT_CONTEXT_ID:
+            return Path(settings.data_dir) / user_id
+        return Path(settings.data_dir) / user_id / "contexts" / context_hash(context_id)
 
     # ------------------------------------------------------------------
     # Backend interface
@@ -54,12 +76,14 @@ class DockerBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
         docker = await self._get_docker()
         api_key = secrets.token_urlsafe(24)
-        instance_name = self._container_name(policy_id, user_id)
-        host_data_dir = str((Path(settings.data_dir) / user_id).resolve())
+        context_id = normalize_context_id(context_id)
+        instance_name = self._container_name(policy_id, user_id, context_id)
+        host_data_dir = str(self._home_dir(user_id, context_id).resolve())
         s = spec or {}
 
         image = s.get("image", settings.image)
@@ -68,7 +92,7 @@ class DockerBackend(Backend):
         if len(networks) == 1:
             network_name = networks[0]
         elif networks:
-            key = f"{policy_id}:{user_id}".encode()
+            key = f"{policy_id}:{user_id}:{context_id}".encode()
             network_name = networks[int(hashlib.sha256(key).hexdigest(), 16) % len(networks)]
 
         host_config: dict = {
@@ -124,14 +148,22 @@ class DockerBackend(Backend):
                 "app.kubernetes.io/managed-by": "terminals",
                 "openwebui.com/user-id": user_id,
                 "openwebui.com/policy": policy_id,
+                CONTEXT_ID_ANNOTATION: context_id,
+                CONTEXT_TYPE_LABEL: (
+                    DEFAULT_CONTEXT_ID
+                    if context_id == DEFAULT_CONTEXT_ID
+                    else context_id.split(":", 1)[0]
+                ),
+                CONTEXT_HASH_LABEL: context_hash(context_id),
             },
         }
 
         log.info(
-            "Provisioning container %s for user %s (policy=%s, network=%s)",
+            "Provisioning container %s for user %s (policy=%s, context=%s, network=%s)",
             instance_name,
             user_id,
             policy_id,
+            context_id,
             network_name or "default",
         )
 
@@ -268,11 +300,12 @@ class DockerBackend(Backend):
 
             user_id = labels.get("openwebui.com/user-id")
             policy_id = labels.get("openwebui.com/policy", "default")
+            context_id = normalize_context_id(labels.get(CONTEXT_ID_ANNOTATION))
             if not user_id:
                 log.debug("Skipping container %s: no user-id label", name)
                 continue
 
-            key = self._key(user_id, policy_id)
+            key = self._key(user_id, policy_id, context_id)
 
             # Already tracked
             if key in self._instances:
@@ -289,7 +322,7 @@ class DockerBackend(Backend):
                 adopted_specs[policy_id] = await self._adopted_spec(policy_id)
             self._instances[key] = instance_info
             self._specs[key] = adopted_specs[policy_id]
-            await self._seed_adopted_activity(key, user_id, policy_id)
+            await self._seed_adopted_activity(key, user_id, policy_id, context_id)
             recovered += 1
             log.info("Reconciled container %s → %s:%s", name, instance_info["host"], instance_info["port"])
 
@@ -329,9 +362,13 @@ class DockerBackend(Backend):
             log.warning("Could not remove container %s (may already be gone)", instance_id)
 
     async def reset(
-        self, user_id: str, policy_id: str, spec: dict | None = None
+        self,
+        user_id: str,
+        policy_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
     ) -> None:
-        home_dir = (Path(settings.data_dir) / user_id).resolve()
+        home_dir = self._home_dir(user_id, context_id).resolve()
         home_dir.mkdir(parents=True, exist_ok=True)
         for child in home_dir.iterdir():
             if child.is_dir() and not child.is_symlink():

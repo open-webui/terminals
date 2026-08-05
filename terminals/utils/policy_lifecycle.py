@@ -10,6 +10,7 @@ from croniter import croniter
 from sqlalchemy import select
 
 from terminals.db.session import async_session
+from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
 
 RESET_KEY = "reset"
 ACTIVITY_KEY = "activity"
@@ -116,12 +117,18 @@ def next_reset_after(
     return _as_utc_naive(parsed)
 
 
-async def reset_due_for(user_id: str, policy_id: str, spec: dict | None) -> bool:
-    """Return True if this user/policy has a reset due."""
+async def reset_due_for(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+    spec: dict | None = None,
+) -> bool:
+    """Return True if this user/policy/context has a reset due."""
     if async_session is None:
         return False
 
     now = _utc_now()
+    context_id = normalize_context_id(context_id)
 
     from terminals.models.policy import PolicyLifecycle, PolicyLifecycleState
 
@@ -142,14 +149,16 @@ async def reset_due_for(user_id: str, policy_id: str, spec: dict | None) -> bool
             select(PolicyLifecycleState).where(
                 PolicyLifecycleState.user_id == user_id,
                 PolicyLifecycleState.policy_id == policy_id,
+                PolicyLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
             state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}",
+                id=f"{user_id}:{policy_id}:{context_id}",
                 user_id=user_id,
                 policy_id=policy_id,
+                context_id=context_id,
                 data={},
             )
             session.add(state)
@@ -173,11 +182,17 @@ async def reset_due_for(user_id: str, policy_id: str, spec: dict | None) -> bool
         return bool(next_due_at and next_due_at <= now)
 
 
-async def mark_reset_applied(user_id: str, policy_id: str, spec: dict | None) -> None:
+async def mark_reset_applied(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+    spec: dict | None = None,
+) -> None:
     if async_session is None:
         return
 
     now = _utc_now()
+    context_id = normalize_context_id(context_id)
 
     from terminals.models.policy import PolicyLifecycle, PolicyLifecycleState
 
@@ -198,14 +213,16 @@ async def mark_reset_applied(user_id: str, policy_id: str, spec: dict | None) ->
             select(PolicyLifecycleState).where(
                 PolicyLifecycleState.user_id == user_id,
                 PolicyLifecycleState.policy_id == policy_id,
+                PolicyLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
             state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}",
+                id=f"{user_id}:{policy_id}:{context_id}",
                 user_id=user_id,
                 policy_id=policy_id,
+                context_id=context_id,
                 data={},
             )
             session.add(state)
@@ -229,12 +246,17 @@ async def mark_reset_applied(user_id: str, policy_id: str, spec: dict | None) ->
         await session.commit()
 
 
-async def mark_terminal_active(user_id: str, policy_id: str) -> None:
+async def mark_terminal_active(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+) -> None:
     """Persist a cross-worker activity heartbeat for a terminal."""
     if async_session is None:
         return
 
     now = _utc_now()
+    context_id = normalize_context_id(context_id)
 
     from terminals.models.policy import PolicyLifecycleState
 
@@ -243,14 +265,16 @@ async def mark_terminal_active(user_id: str, policy_id: str) -> None:
             select(PolicyLifecycleState).where(
                 PolicyLifecycleState.user_id == user_id,
                 PolicyLifecycleState.policy_id == policy_id,
+                PolicyLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
             state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}",
+                id=f"{user_id}:{policy_id}:{context_id}",
                 user_id=user_id,
                 policy_id=policy_id,
+                context_id=context_id,
                 data={},
             )
             session.add(state)
@@ -261,10 +285,16 @@ async def mark_terminal_active(user_id: str, policy_id: str) -> None:
         await session.commit()
 
 
-async def terminal_last_active_at(user_id: str, policy_id: str) -> datetime | None:
+async def terminal_last_active_at(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+) -> datetime | None:
     """Return the latest persisted activity heartbeat for a terminal."""
     if async_session is None:
         return None
+
+    context_id = normalize_context_id(context_id)
 
     from terminals.models.policy import PolicyLifecycleState
 
@@ -273,6 +303,7 @@ async def terminal_last_active_at(user_id: str, policy_id: str) -> datetime | No
             select(PolicyLifecycleState).where(
                 PolicyLifecycleState.user_id == user_id,
                 PolicyLifecycleState.policy_id == policy_id,
+                PolicyLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()

@@ -21,6 +21,14 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend, RefreshResult
 from terminals.config import settings
+from terminals.utils.context import (
+    CONTEXT_HASH_LABEL,
+    CONTEXT_ID_ANNOTATION,
+    CONTEXT_TYPE_LABEL,
+    DEFAULT_CONTEXT_ID,
+    context_hash,
+    normalize_context_id,
+)
 from terminals.utils.env import build_terminal_env
 from terminals.utils.kubernetes_security import (
     container_security_context,
@@ -37,15 +45,25 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DNS_SAFE = re.compile(r"[^a-z0-9-]")
+_POLICY_ID_ANNOTATION = "openwebui.com/policy-id"
 
 
-def _sanitize_name(user_id: str, policy_id: str = "default") -> str:
+def _sanitize_name(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+) -> str:
     """Deterministic, DNS-safe Terminal CR name from a user ID + policy."""
     short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+    context_id = normalize_context_id(context_id)
     if policy_id == "default":
-        return f"terminal-{short}"
-    policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-    return f"terminal-{short}-{policy_slug}"
+        name = f"terminal-{short}"
+    else:
+        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        name = f"terminal-{short}-{policy_slug}"
+    if context_id != DEFAULT_CONTEXT_ID:
+        name = f"{name}-{context_hash(context_id)}"
+    return name
 
 
 class KubernetesOperatorBackend(Backend):
@@ -59,7 +77,7 @@ class KubernetesOperatorBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
-        self._last_activity_status_updated_at: dict[str, float] = {}
+        self._last_activity_status_updated_at: dict[tuple[str, str, str], float] = {}
 
     async def _ensure_client(self) -> ApiClient:
         if self._api_client is None:
@@ -103,12 +121,15 @@ class KubernetesOperatorBackend(Backend):
             raise
 
     async def _get_terminal_cr(
-        self, user_id: str, policy_id: str = "default"
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> Optional[dict]:
         """Get the Terminal CR for a user+policy, or None if it doesn't exist."""
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
         try:
             return await custom.get_namespaced_custom_object(
@@ -127,12 +148,14 @@ class KubernetesOperatorBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
         """Create a Terminal CR for a user+policy and return it."""
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
         s = spec or {}
 
@@ -143,6 +166,7 @@ class KubernetesOperatorBackend(Backend):
         cr_spec: dict = {
             "userId": user_id,
             "image": image,
+            "contextId": context_id,
         }
         restricted = restricted_enabled(s)
         if restricted:
@@ -187,6 +211,9 @@ class KubernetesOperatorBackend(Backend):
         )
         if env:
             cr_spec["env"] = env
+        pod_template = s.get("pod_template") or s.get("podTemplate")
+        if pod_template:
+            cr_spec["podTemplate"] = pod_template
 
         # Idle timeout
         idle_timeout = s.get("idle_timeout_minutes", settings.idle_timeout_minutes)
@@ -206,6 +233,16 @@ class KubernetesOperatorBackend(Backend):
                     "app.kubernetes.io/part-of": "open-terminal",
                     "openwebui.com/user-id": user_id,
                     "openwebui.com/policy": policy_slug,
+                    CONTEXT_TYPE_LABEL: (
+                        DEFAULT_CONTEXT_ID
+                        if context_id == DEFAULT_CONTEXT_ID
+                        else context_id.split(":", 1)[0]
+                    ),
+                    CONTEXT_HASH_LABEL: context_hash(context_id),
+                },
+                "annotations": {
+                    _POLICY_ID_ANNOTATION: policy_id,
+                    CONTEXT_ID_ANNOTATION: context_id,
                 },
             },
             "spec": cr_spec,
@@ -222,10 +259,12 @@ class KubernetesOperatorBackend(Backend):
         except client.exceptions.ApiException as exc:
             if exc.status == 409:
                 # Already exists — but may be mid-deletion (finalizer pending).
-                existing = await self._get_terminal_cr(user_id, policy_id)
+                existing = await self._get_terminal_cr(user_id, policy_id, context_id)
                 if existing and existing.get("metadata", {}).get("deletionTimestamp"):
                     # CR is being deleted; wait for it to vanish, then retry create
-                    await self._wait_for_deletion(user_id, policy_id, timeout=60)
+                    await self._wait_for_deletion(
+                        user_id, policy_id, context_id=context_id, timeout=60
+                    )
                     return await custom.create_namespaced_custom_object(
                         group=self._group,
                         version=self._version,
@@ -249,6 +288,7 @@ class KubernetesOperatorBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         wait: bool = True,
         timeout: int = 60,
     ) -> bool:
@@ -257,7 +297,8 @@ class KubernetesOperatorBackend(Backend):
         When *wait* is True (default), polls until the CR returns 404 so that
         a subsequent create won't collide with the kopf finalizer.
         """
-        key = self._key(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        key = self._key(user_id, policy_id, context_id)
         self._instances.pop(key, None)
         self._specs.pop(key, None)
         self._activity.pop(key, None)
@@ -268,7 +309,7 @@ class KubernetesOperatorBackend(Backend):
 
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
         try:
             await custom.delete_namespaced_custom_object(
@@ -307,12 +348,16 @@ class KubernetesOperatorBackend(Backend):
         return True
 
     async def _wait_for_deletion(
-        self, user_id: str, policy_id: str = "default", timeout: int = 60
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
+        timeout: int = 60,
     ) -> None:
         """Poll until a Terminal CR no longer exists (404)."""
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
 
         deadline = asyncio.get_event_loop().time() + timeout
@@ -435,12 +480,17 @@ class KubernetesOperatorBackend(Backend):
             await asyncio.sleep(0.5)
 
     async def reset(
-        self, user_id: str, policy_id: str, spec: dict | None = None
+        self,
+        user_id: str,
+        policy_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
     ) -> None:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         ns = settings.kubernetes_namespace
-        terminal_name = _sanitize_name(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        terminal_name = _sanitize_name(user_id, policy_id, context_id)
         reset_name = f"{terminal_name[:57]}-reset"
         claim_name = f"{terminal_name}-pvc"
 
@@ -456,6 +506,12 @@ class KubernetesOperatorBackend(Backend):
             "app.kubernetes.io/part-of": "open-terminal",
             "openwebui.com/user-id": user_id,
             "openwebui.com/policy": _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20],
+            CONTEXT_TYPE_LABEL: (
+                DEFAULT_CONTEXT_ID
+                if context_id == DEFAULT_CONTEXT_ID
+                else context_id.split(":", 1)[0]
+            ),
+            CONTEXT_HASH_LABEL: context_hash(context_id),
             "openwebui.com/reset": "true",
         }
         pod = client.V1Pod(
@@ -508,6 +564,7 @@ class KubernetesOperatorBackend(Backend):
         *,
         user_id: str | None = None,
         policy_id: str | None = None,
+        context_id: str | None = None,
         only_idle: bool = True,
         reset: bool = False,
     ) -> RefreshResult:
@@ -526,11 +583,20 @@ class KubernetesOperatorBackend(Backend):
         )
         for item in crs.get("items", []):
             labels = item.get("metadata", {}).get("labels", {})
+            annotations = item.get("metadata", {}).get("annotations", {})
             item_user = labels.get("openwebui.com/user-id") or item.get("spec", {}).get("userId")
-            item_policy = labels.get("openwebui.com/policy", "default")
+            item_policy = annotations.get(_POLICY_ID_ANNOTATION) or labels.get(
+                "openwebui.com/policy", "default"
+            )
+            item_context = normalize_context_id(
+                item.get("spec", {}).get("contextId")
+                or annotations.get(CONTEXT_ID_ANNOTATION)
+            )
             if user_id and item_user != user_id:
                 continue
             if policy_id and item_policy != policy_id:
+                continue
+            if context_id is not None and item_context != normalize_context_id(context_id):
                 continue
 
             result.matched += 1
@@ -547,7 +613,7 @@ class KubernetesOperatorBackend(Backend):
                 plural=self._plural,
                 name=name,
             )
-            key = self._key(item_user or "", item_policy)
+            key = self._key(item_user or "", item_policy, item_context)
             self._instances.pop(key, None)
             self._specs.pop(key, None)
             self._activity.pop(key, None)
@@ -558,7 +624,7 @@ class KubernetesOperatorBackend(Backend):
             result.refreshed += 1
 
             if reset and item_user:
-                await self.reset(item_user, item_policy, item.get("spec") or {})
+                await self.reset(item_user, item_policy, item_context, item.get("spec") or {})
                 result.reset += 1
 
         return result
@@ -571,13 +637,17 @@ class KubernetesOperatorBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> Optional[dict]:
         """Create a Terminal CR and wait for it to become ready.
 
         Returns connection info dict or ``None`` on timeout.
         """
-        cr = await self._create_terminal_cr(user_id, policy_id=policy_id, spec=spec)
+        context_id = normalize_context_id(context_id)
+        cr = await self._create_terminal_cr(
+            user_id, policy_id=policy_id, context_id=context_id, spec=spec
+        )
         name = cr["metadata"]["name"]
         ns = settings.kubernetes_namespace
 
@@ -689,6 +759,7 @@ class KubernetesOperatorBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: Optional[dict] = None,
     ) -> Optional[dict]:
         """Get or create a terminal, resolving from K8s CRDs.
@@ -698,7 +769,8 @@ class KubernetesOperatorBackend(Backend):
 
         Returns a dict with ``api_key``, ``host``, ``port`` or ``None``.
         """
-        key = self._key(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        key = self._key(user_id, policy_id, context_id)
         checked = self._running_checked_at.get(key)
         if (
             key in self._instances
@@ -710,7 +782,7 @@ class KubernetesOperatorBackend(Backend):
             return self._instances[key]
 
         # Fast path: check if CR is already Running without taking the lock.
-        cr = await self._get_terminal_cr(user_id, policy_id)
+        cr = await self._get_terminal_cr(user_id, policy_id, context_id)
         if cr:
             status = cr.get("status") or {}
             phase = status.get("phase")
@@ -737,11 +809,13 @@ class KubernetesOperatorBackend(Backend):
 
         async with self._locks[key]:
             # Re-check after acquiring lock.
-            cr = await self._get_terminal_cr(user_id, policy_id)
+            cr = await self._get_terminal_cr(user_id, policy_id, context_id)
 
             if cr is None:
-                await self._apply_due_reset(user_id, policy_id, spec)
-                info = await self.provision(user_id, policy_id=policy_id, spec=spec)
+                await self._apply_due_reset(user_id, policy_id, context_id, spec)
+                info = await self.provision(
+                    user_id, policy_id=policy_id, context_id=context_id, spec=spec
+                )
                 if info:
                     self._instances[key] = info
                     self._specs[key] = spec or {}
@@ -758,9 +832,11 @@ class KubernetesOperatorBackend(Backend):
                     cr["metadata"]["name"],
                     phase,
                 )
-                await self._delete_terminal_cr(user_id, policy_id)
-                await self._apply_due_reset(user_id, policy_id, spec)
-                info = await self.provision(user_id, policy_id=policy_id, spec=spec)
+                await self._delete_terminal_cr(user_id, policy_id, context_id=context_id)
+                await self._apply_due_reset(user_id, policy_id, context_id, spec)
+                info = await self.provision(
+                    user_id, policy_id=policy_id, context_id=context_id, spec=spec
+                )
                 if info:
                     self._instances[key] = info
                     self._specs[key] = spec or {}
@@ -830,16 +906,20 @@ class KubernetesOperatorBackend(Backend):
         return None
 
     async def touch_activity(
-        self, user_id: str, policy_id: str = "default"
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> None:
         """Update lastActivityAt on the Terminal CR to prevent idle culling."""
-        key = self._key(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        key = self._key(user_id, policy_id, context_id)
         checked = self._last_activity_status_updated_at.get(key)
         self._record_activity(key)
         synced = self._activity_synced_at.get(key)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
         if synced is None or time.monotonic() - synced >= interval:
-            await mark_terminal_active(user_id, policy_id)
+            await mark_terminal_active(user_id, policy_id, context_id)
             self._activity_synced_at[key] = time.monotonic()
         if (
             settings.status_cache_ttl > 0
@@ -850,7 +930,7 @@ class KubernetesOperatorBackend(Backend):
 
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -869,5 +949,5 @@ class KubernetesOperatorBackend(Backend):
             if e.status != 404:
                 log.warning("Failed to touch activity for %s: %s", name, e)
             else:
-                self.invalidate_status(user_id, policy_id)
+                self.invalidate_status(user_id, policy_id, context_id)
                 self._last_activity_status_updated_at.pop(key, None)
