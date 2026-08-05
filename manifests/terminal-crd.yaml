@@ -32,10 +32,25 @@ spec:
                 userId:
                   type: string
                   description: Open WebUI user ID that owns this terminal.
+                contextId:
+                  type: string
+                  default: "default"
+                  description: >-
+                    Optional runtime context for separate terminal instances.
+                    v1 supports "default", "chat:<chat_id>", and
+                    "automation:<automation_id>".
                 image:
                   type: string
                   default: "ghcr.io/open-webui/open-terminal:latest"
                   description: Container image for the Open Terminal instance.
+                podTemplate:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    Optional PodTemplate-style metadata/spec overrides merged
+                    into the generated terminal pod. Terminals-owned identity,
+                    owner reference, auth, and service wiring remain controlled
+                    by the operator.
                 resources:
                   type: object
                   properties:

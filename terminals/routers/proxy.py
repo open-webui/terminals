@@ -24,6 +24,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from terminals.config import settings
+from terminals.utils.context import (
+    CONTEXT_HEADER,
+    DEFAULT_CONTEXT_ID,
+    normalize_context_id,
+)
 from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
 from terminals.routers.auth import validate_token, verify_api_key, verify_user_id
 
@@ -87,6 +92,13 @@ def _request_id(request) -> Optional[str]:
     return getattr(getattr(request, "state", None), "request_id", None)
 
 
+def _context_from_request(request: Request) -> str:
+    try:
+        return normalize_context_id(request.headers.get(CONTEXT_HEADER))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Resolve instance
 # ---------------------------------------------------------------------------
@@ -105,15 +117,18 @@ async def _resolve_instance(
     request,
     user_id: str,
     policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
     spec: Optional[dict] = None,
 ) -> InstanceInfo:
     """Return a running instance, auto-provisioning if needed."""
     backend = request.app.state.backend
-    info = await backend.ensure_terminal(user_id, policy_id=policy_id, spec=spec)
+    info = await backend.ensure_terminal(
+        user_id, policy_id=policy_id, context_id=context_id, spec=spec
+    )
     if info is None:
         raise RuntimeError(f"Failed to provision terminal for user {user_id}")
     try:
-        await backend.touch_activity(user_id, policy_id=policy_id)
+        await backend.touch_activity(user_id, policy_id=policy_id, context_id=context_id)
     except Exception:
         logger.debug("touch_activity failed for user {}", user_id)
     return InstanceInfo(
@@ -133,6 +148,7 @@ async def _proxy_request(
     request: Request, user_id: str, path: str,
     background_tasks: Optional[BackgroundTasks] = None,
     policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
     spec: Optional[dict] = None,
 ) -> Response:
     """Forward an HTTP request to the user's terminal instance.
@@ -141,7 +157,7 @@ async def _proxy_request(
     to avoid buffering large payloads in memory.
     """
     instance = await _resolve_instance(
-        request, user_id, policy_id=policy_id, spec=spec,
+        request, user_id, policy_id=policy_id, context_id=context_id, spec=spec,
     )
 
     target_url = f"http://{instance.host}:{instance.port}/{path}"
@@ -152,7 +168,7 @@ async def _proxy_request(
     # Replace auth with the instance's own API key.
     headers["authorization"] = f"Bearer {instance.api_key}"
     # Remove hop-by-hop / routing headers.
-    for h in ("host", "transfer-encoding", "connection", "x-user-id"):
+    for h in ("host", "transfer-encoding", "connection", "x-user-id", CONTEXT_HEADER.lower()):
         headers.pop(h, None)
 
     raw_content_length = request.headers.get("content-length")
@@ -188,13 +204,17 @@ async def _proxy_request(
             )
             break
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            request.app.state.backend.invalidate_status(user_id, policy_id)
+            request.app.state.backend.invalidate_status(user_id, policy_id, context_id)
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
                 try:
                     instance = await _resolve_instance(
-                        request, user_id, policy_id=policy_id, spec=spec
+                        request,
+                        user_id,
+                        policy_id=policy_id,
+                        context_id=context_id,
+                        spec=spec,
                     )
                 except Exception as resolve_err:
                     logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
@@ -216,7 +236,9 @@ async def _proxy_request(
                     media_type="application/json",
                 )
         except (httpx.RemoteProtocolError, httpx.ReadError) as e:
-            request.app.state.backend.invalidate_status(user_id, policy_id)
+            request.app.state.backend.invalidate_status(
+                user_id, policy_id, context_id
+            )
             if attempt < max_retries - 1:
                 logger.debug(
                     "Proxy attempt {} to {} hit a stale upstream connection ({}), retrying...",
@@ -226,7 +248,11 @@ async def _proxy_request(
                 )
                 try:
                     instance = await _resolve_instance(
-                        request, user_id, policy_id=policy_id, spec=spec
+                        request,
+                        user_id,
+                        policy_id=policy_id,
+                        context_id=context_id,
+                        spec=spec,
                     )
                 except Exception as resolve_err:
                     logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
@@ -435,9 +461,10 @@ async def policy_proxy(
 ):
     """Proxy a request through a named policy endpoint."""
     _id, spec = await _resolve_policy_spec(policy_id)
+    context_id = _context_from_request(request)
     return await _proxy_request(
         request, x_user_id, path, background_tasks,
-        policy_id=_id, spec=spec,
+        policy_id=_id, context_id=context_id, spec=spec,
     )
 
 
@@ -460,7 +487,10 @@ async def proxy(
 
     Uses settings.* defaults — no policy lookup.
     """
-    return await _proxy_request(request, x_user_id, path, background_tasks)
+    context_id = _context_from_request(request)
+    return await _proxy_request(
+        request, x_user_id, path, background_tasks, context_id=context_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +554,7 @@ async def _ws_proxy_handler(
     session_id: str,
     user_id: str,
     policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
     spec: Optional[dict] = None,
 ):
     """Core WebSocket proxy logic, shared by default and policy routes.
@@ -535,7 +566,14 @@ async def _ws_proxy_handler(
     global active_ws_connections
     active_ws_connections += 1
     try:
-        await _ws_proxy(ws, session_id, user_id, policy_id=policy_id, spec=spec)
+        await _ws_proxy(
+            ws,
+            session_id,
+            user_id,
+            policy_id=policy_id,
+            context_id=context_id,
+            spec=spec,
+        )
     finally:
         active_ws_connections -= 1
         try:
@@ -549,11 +587,12 @@ async def _ws_proxy(
     session_id: str,
     user_id: str,
     policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
     spec: Optional[dict] = None,
 ):
     try:
         instance = await _resolve_instance(
-            ws, user_id, policy_id=policy_id, spec=spec
+            ws, user_id, policy_id=policy_id, context_id=context_id, spec=spec
         )
     except Exception as e:
         logger.error("Failed to resolve instance for WS: {}", e)
@@ -576,13 +615,17 @@ async def _ws_proxy(
             OSError,
             InvalidHandshake,
         ) as e:
-            ws.app.state.backend.invalidate_status(user_id, policy_id)
+            ws.app.state.backend.invalidate_status(user_id, policy_id, context_id)
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
                 try:
                     instance = await _resolve_instance(
-                        ws, user_id, policy_id=policy_id, spec=spec
+                        ws,
+                        user_id,
+                        policy_id=policy_id,
+                        context_id=context_id,
+                        spec=spec,
                     )
                 except Exception as resolve_err:
                     logger.error("WS re-resolve for user {} failed: {}", user_id, resolve_err)
@@ -634,12 +677,18 @@ async def ws_terminal_proxy(
     ws: WebSocket,
     session_id: str,
     user_id: str = Query(""),
+    context_id: str = Query(DEFAULT_CONTEXT_ID),
 ):
     """Default WebSocket terminal proxy (no policy)."""
     effective_user = await _validate_ws_auth(ws, user_id)
     if effective_user is None:
         return
-    await _ws_proxy_handler(ws, session_id, effective_user)
+    try:
+        context_id = normalize_context_id(context_id)
+    except ValueError as exc:
+        await ws.close(code=4004, reason=str(exc))
+        return
+    await _ws_proxy_handler(ws, session_id, effective_user, context_id=context_id)
 
 
 @router.websocket("/p/{policy_id}/api/terminals/{session_id}")
@@ -648,6 +697,7 @@ async def ws_policy_terminal_proxy(
     policy_id: str,
     session_id: str,
     user_id: str = Query(""),
+    context_id: str = Query(DEFAULT_CONTEXT_ID),
 ):
     """Policy-scoped WebSocket terminal proxy."""
     effective_user = await _validate_ws_auth(ws, user_id)
@@ -656,8 +706,19 @@ async def ws_policy_terminal_proxy(
 
     try:
         _id, spec = await _resolve_policy_spec(policy_id)
+        context_id = normalize_context_id(context_id)
     except HTTPException:
         await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
         return
+    except ValueError as exc:
+        await ws.close(code=4004, reason=str(exc))
+        return
 
-    await _ws_proxy_handler(ws, session_id, effective_user, policy_id=_id, spec=spec)
+    await _ws_proxy_handler(
+        ws,
+        session_id,
+        effective_user,
+        policy_id=_id,
+        context_id=context_id,
+        spec=spec,
+    )

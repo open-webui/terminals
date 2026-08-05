@@ -16,6 +16,7 @@ from terminals.utils.policy_lifecycle import (
     terminal_last_active_at,
 )
 from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
+from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
 
 log = logging.getLogger(__name__)
 
@@ -38,14 +39,14 @@ class Backend(ABC):
     """
 
     def __init__(self) -> None:
-        # key = "{user_id}:{policy_id}"
-        self._activity: dict[str, float] = {}      # → last-active unix timestamp
-        self._activity_wall: dict[str, float] = {} # → last-active wall-clock timestamp
-        self._instances: dict[str, dict] = {}       # → provision result dict
-        self._specs: dict[str, dict] = {}           # → resolved policy spec
-        self._locks: dict[str, asyncio.Lock] = {}   # → per-key provisioning lock
-        self._running_checked_at: dict[str, float] = {}
-        self._activity_synced_at: dict[str, float] = {}
+        # key = (user_id, policy_id, context_id)
+        self._activity: dict[tuple[str, str, str], float] = {}
+        self._activity_wall: dict[tuple[str, str, str], float] = {}
+        self._instances: dict[tuple[str, str, str], dict] = {}
+        self._specs: dict[tuple[str, str, str], dict] = {}
+        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._running_checked_at: dict[tuple[str, str, str], float] = {}
+        self._activity_synced_at: dict[tuple[str, str, str], float] = {}
         self._reaper_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -57,11 +58,13 @@ class Backend(ABC):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: Optional[dict] = None,
     ) -> dict:
         """Create a new terminal instance for *user_id*.
 
-        *policy_id* scopes the container (one per user+policy pair).
+        *policy_id* scopes the environment shape. *context_id* optionally
+        scopes separate runtime copies of that policy.
         *spec* is the resolved policy spec dict; if ``None``, the backend
         uses ``settings.*`` defaults.
 
@@ -86,7 +89,11 @@ class Backend(ABC):
         """Release resources on shutdown."""
 
     async def reset(
-        self, user_id: str, policy_id: str, spec: Optional[dict] = None
+        self,
+        user_id: str,
+        policy_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: Optional[dict] = None,
     ) -> None:
         """Delete persisted files for a user terminal."""
         raise NotImplementedError("Reset is not supported by this backend")
@@ -96,20 +103,30 @@ class Backend(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _key(user_id: str, policy_id: str = "default") -> str:
-        return f"{user_id}:{policy_id}"
+    def _key(
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> tuple[str, str, str]:
+        return (user_id, policy_id, normalize_context_id(context_id))
 
-    def _record_activity(self, key: str) -> None:
+    def _record_activity(self, key: tuple[str, str, str]) -> None:
         self._activity[key] = time.monotonic()
         self._activity_wall[key] = time.time()
 
-    def invalidate_status(self, user_id: str, policy_id: str = "default") -> None:
-        self._running_checked_at.pop(self._key(user_id, policy_id), None)
+    def invalidate_status(
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> None:
+        self._running_checked_at.pop(self._key(user_id, policy_id, context_id), None)
 
     async def ensure_terminal(
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: Optional[dict] = None,
     ) -> Optional[dict]:
         """Get-or-create a terminal for *user_id*.
@@ -120,7 +137,8 @@ class Backend(ABC):
         Uses a per-key lock so concurrent requests for the same user+policy
         don't race to provision the same container.
         """
-        key = self._key(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        key = self._key(user_id, policy_id, context_id)
 
         # Fast path — already tracked and running.
         if key in self._instances:
@@ -160,8 +178,10 @@ class Backend(ABC):
                 self._running_checked_at.pop(key, None)
                 self._activity_synced_at.pop(key, None)
 
-            await self._apply_due_reset(user_id, policy_id, spec)
-            result = await self.provision(user_id, policy_id=policy_id, spec=spec)
+            await self._apply_due_reset(user_id, policy_id, context_id, spec)
+            result = await self.provision(
+                user_id, policy_id=policy_id, context_id=context_id, spec=spec
+            )
             if result:
                 self._instances[key] = result
                 self._specs[key] = spec or {}
@@ -174,16 +194,20 @@ class Backend(ABC):
         return None
 
     async def touch_activity(
-        self, user_id: str, policy_id: str = "default"
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> None:
         """Record that *user_id*'s terminal is actively being used."""
-        key = self._key(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        key = self._key(user_id, policy_id, context_id)
         self._record_activity(key)
         checked = self._activity_synced_at.get(key)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
         if checked is not None and time.monotonic() - checked < interval:
             return
-        await mark_terminal_active(user_id, policy_id)
+        await mark_terminal_active(user_id, policy_id, context_id)
         self._activity_synced_at[key] = time.monotonic()
 
     async def _adopted_spec(self, policy_id: str) -> dict:
@@ -198,12 +222,16 @@ class Backend(ABC):
             return {}
 
     async def _seed_adopted_activity(
-        self, key: str, user_id: str, policy_id: str
+        self,
+        key: tuple[str, str, str],
+        user_id: str,
+        policy_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> None:
         """Preserve persisted idle time when adopting an existing instance."""
         self._record_activity(key)
         try:
-            last_active = await terminal_last_active_at(user_id, policy_id)
+            last_active = await terminal_last_active_at(user_id, policy_id, context_id)
         except Exception:
             log.exception("Failed to load persisted activity for %s", key)
             return
@@ -215,12 +243,16 @@ class Backend(ABC):
             self._activity[key] = time.monotonic() - (time.time() - wall)
 
     async def _apply_due_reset(
-        self, user_id: str, policy_id: str, spec: Optional[dict]
+        self,
+        user_id: str,
+        policy_id: str,
+        context_id: str,
+        spec: Optional[dict],
     ) -> bool:
-        if not await reset_due_for(user_id, policy_id, spec):
+        if not await reset_due_for(user_id, policy_id, context_id, spec):
             return False
-        await self.reset(user_id, policy_id, spec)
-        await mark_reset_applied(user_id, policy_id, spec)
+        await self.reset(user_id, policy_id, context_id, spec)
+        await mark_reset_applied(user_id, policy_id, context_id, spec)
         log.info("Reset files for user=%s policy=%s", user_id, policy_id)
         return True
 
@@ -229,18 +261,25 @@ class Backend(ABC):
         *,
         user_id: str | None = None,
         policy_id: str | None = None,
-    ) -> list[tuple[str, str, str, dict, dict]]:
+        context_id: str | None = None,
+    ) -> list[tuple[tuple[str, str, str], str, str, str, dict, dict]]:
         matches = []
         for key, info in list(self._instances.items()):
-            item_user, item_policy = key.split(":", 1)
+            item_user, item_policy, item_context = key
             if user_id and item_user != user_id:
                 continue
             if policy_id and item_policy != policy_id:
                 continue
-            matches.append((key, item_user, item_policy, info, self._specs.get(key, {})))
+            if context_id is not None and item_context != normalize_context_id(context_id):
+                continue
+            matches.append(
+                (key, item_user, item_policy, item_context, info, self._specs.get(key, {}))
+            )
         return matches
 
-    def _is_idle_by_activity(self, key: str, spec: Optional[dict], now: float) -> bool:
+    def _is_idle_by_activity(
+        self, key: tuple[str, str, str], spec: Optional[dict], now: float
+    ) -> bool:
         timeout_min = (spec or {}).get(
             "idle_timeout_minutes", settings.idle_timeout_minutes
         )
@@ -254,6 +293,7 @@ class Backend(ABC):
         *,
         user_id: str | None = None,
         policy_id: str | None = None,
+        context_id: str | None = None,
         only_idle: bool = True,
         reset: bool = False,
     ) -> RefreshResult:
@@ -261,8 +301,8 @@ class Backend(ABC):
         result = RefreshResult()
         now = time.monotonic()
 
-        for key, item_user, item_policy, info, spec in self._tracked_items(
-            user_id=user_id, policy_id=policy_id
+        for key, item_user, item_policy, item_context, info, spec in self._tracked_items(
+            user_id=user_id, policy_id=policy_id, context_id=context_id
         ):
             result.matched += 1
             st = await self.status(info["instance_id"])
@@ -282,7 +322,7 @@ class Backend(ABC):
             result.refreshed += 1
 
             if reset:
-                await self.reset(item_user, item_policy, spec)
+                await self.reset(item_user, item_policy, item_context, spec)
                 result.reset += 1
 
         return result
@@ -291,7 +331,7 @@ class Backend(ABC):
         """Return sanitized tracked terminal instances for the admin UI."""
         rows = []
         now = time.monotonic()
-        for key, user_id, policy_id, info, spec in self._tracked_items():
+        for key, user_id, policy_id, context_id, info, spec in self._tracked_items():
             status = await self.status(info["instance_id"])
             last_active = self._activity.get(key)
             last_active_wall = self._activity_wall.get(key)
@@ -302,6 +342,7 @@ class Backend(ABC):
                 {
                     "user_id": user_id,
                     "policy_id": policy_id,
+                    "context_id": context_id,
                     "status": status,
                     "instance_id": info.get("instance_id", ""),
                     "instance_name": info.get("instance_name", info.get("instance_id", "")),
@@ -362,9 +403,9 @@ class Backend(ABC):
                 continue
 
             spec = self._specs.get(key, {})
-            user_id, policy_id = key.split(":", 1)
+            user_id, policy_id, context_id = key
             cleanup_timeout = settings.idle_cleanup_timeout_seconds
-            if await reset_due_for(user_id, policy_id, spec):
+            if await reset_due_for(user_id, policy_id, context_id, spec):
                 log.info(
                     "Refreshing terminal %s for due reset (user=%s, policy=%s)",
                     info.get("instance_name", info.get("instance_id")),
@@ -386,10 +427,10 @@ class Backend(ABC):
                     log.exception("Failed to tear down %s for scheduled reset", key)
                 try:
                     await asyncio.wait_for(
-                        self.reset(user_id, policy_id, spec), cleanup_timeout
+                        self.reset(user_id, policy_id, context_id, spec), cleanup_timeout
                     )
                     await asyncio.wait_for(
-                        mark_reset_applied(user_id, policy_id, spec), cleanup_timeout
+                        mark_reset_applied(user_id, policy_id, context_id, spec), cleanup_timeout
                     )
                 except NotImplementedError:
                     log.warning("Reset due for %s but backend does not support it", key)
@@ -414,7 +455,9 @@ class Backend(ABC):
             if not timeout_min or timeout_min <= 0:
                 continue
 
-            shared_last_active = await terminal_last_active_at(user_id, policy_id)
+            shared_last_active = await terminal_last_active_at(
+                user_id, policy_id, context_id
+            )
             if shared_last_active:
                 shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
                 if shared_wall > self._activity_wall.get(key, 0):
@@ -426,10 +469,11 @@ class Backend(ABC):
 
             if idle_seconds >= timeout_min * 60:
                 log.info(
-                    "Reaping idle terminal %s (user=%s, policy=%s, idle=%.0fs, timeout=%dm)",
+                    "Reaping idle terminal %s (user=%s, policy=%s, context=%s, idle=%.0fs, timeout=%dm)",
                     info.get("instance_name", info.get("instance_id")),
                     user_id,
                     policy_id,
+                    context_id,
                     idle_seconds,
                     timeout_min,
                 )
@@ -448,7 +492,7 @@ class Backend(ABC):
                     log.exception("Failed to tear down %s", key)
                 try:
                     await asyncio.wait_for(
-                        self._apply_due_reset(user_id, policy_id, spec),
+                        self._apply_due_reset(user_id, policy_id, context_id, spec),
                         cleanup_timeout,
                     )
                 except NotImplementedError:

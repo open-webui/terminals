@@ -13,6 +13,14 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.context import (
+    CONTEXT_HASH_LABEL,
+    CONTEXT_ID_ANNOTATION,
+    CONTEXT_TYPE_LABEL,
+    DEFAULT_CONTEXT_ID,
+    context_hash,
+    normalize_context_id,
+)
 from terminals.utils.env import build_terminal_env
 from terminals.utils.kubernetes_security import (
     container_security_context,
@@ -31,13 +39,22 @@ _DNS_SAFE = re.compile(r"[^a-z0-9-]")
 _POLICY_ID_ANNOTATION = "openwebui.com/policy-id"
 
 
-def _sanitize_name(user_id: str, policy_id: str = "default") -> str:
+def _sanitize_name(
+    user_id: str,
+    policy_id: str = "default",
+    context_id: str = DEFAULT_CONTEXT_ID,
+) -> str:
     """Deterministic, DNS-safe K8s resource name (≤63 chars)."""
     short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
+    context_id = normalize_context_id(context_id)
     if policy_id == "default":
-        return f"terminal-{short}"
-    policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-    return f"terminal-{short}-{policy_slug}"
+        name = f"terminal-{short}"
+    else:
+        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        name = f"terminal-{short}-{policy_slug}"
+    if context_id != DEFAULT_CONTEXT_ID:
+        name = f"{name}-{context_hash(context_id)}"
+    return name
 
 
 def _parse_labels() -> dict[str, str]:
@@ -91,6 +108,7 @@ class KubernetesBackend(Backend):
         self,
         user_id: str,
         policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
         api_client = await self._ensure_client()
@@ -98,12 +116,22 @@ class KubernetesBackend(Backend):
         s = spec or {}
 
         api_key = secrets.token_urlsafe(24)
-        name = _sanitize_name(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        name = _sanitize_name(user_id, policy_id, context_id)
         policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
         ns = settings.kubernetes_namespace
         labels = _base_labels(user_id)
         labels["openwebui.com/policy"] = policy_slug
-        annotations = {_POLICY_ID_ANNOTATION: policy_id}
+        labels[CONTEXT_TYPE_LABEL] = (
+            DEFAULT_CONTEXT_ID
+            if context_id == DEFAULT_CONTEXT_ID
+            else context_id.split(":", 1)[0]
+        )
+        labels[CONTEXT_HASH_LABEL] = context_hash(context_id)
+        annotations = {
+            _POLICY_ID_ANNOTATION: policy_id,
+            CONTEXT_ID_ANNOTATION: context_id,
+        }
 
         image = s.get("image", settings.kubernetes_image)
         storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
@@ -174,6 +202,11 @@ class KubernetesBackend(Backend):
         volume_mounts = []
         affinity = None
         shared_pvc_name = f"terminals-shared-{ns}"
+        shared_sub_path = (
+            user_id
+            if context_id == DEFAULT_CONTEXT_ID
+            else f"{user_id}/contexts/{context_hash(context_id)}"
+        )
 
         if storage_size:
             if storage_mode == "per-user":
@@ -225,7 +258,7 @@ class KubernetesBackend(Backend):
                     client.V1VolumeMount(
                         name="home",
                         mount_path="/home/user",
-                        sub_path=user_id,
+                        sub_path=shared_sub_path,
                     ),
                 )
 
@@ -244,7 +277,7 @@ class KubernetesBackend(Backend):
                     client.V1VolumeMount(
                         name="home",
                         mount_path="/home/user",
-                        sub_path=user_id,
+                        sub_path=shared_sub_path,
                     ),
                 )
 
@@ -307,6 +340,7 @@ class KubernetesBackend(Backend):
                 selector={
                     "openwebui.com/user-id": user_id,
                     "openwebui.com/policy": policy_slug,
+                    CONTEXT_HASH_LABEL: context_hash(context_id),
                 },
                 ports=[
                     client.V1ServicePort(port=8000, target_port=8000),
@@ -400,7 +434,11 @@ class KubernetesBackend(Backend):
         # Note: PVC is intentionally kept for data persistence.
 
     async def reset(
-        self, user_id: str, policy_id: str, spec: dict | None = None
+        self,
+        user_id: str,
+        policy_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
     ) -> None:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
@@ -411,14 +449,19 @@ class KubernetesBackend(Backend):
             return
 
         storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
-        terminal_name = _sanitize_name(user_id, policy_id)
+        context_id = normalize_context_id(context_id)
+        terminal_name = _sanitize_name(user_id, policy_id, context_id)
         reset_name = f"{terminal_name[:57]}-reset"
         shared_pvc_name = f"terminals-shared-{ns}"
         claim_name = terminal_name
         sub_path = None
         if storage_mode in ("shared", "shared-rwo"):
             claim_name = shared_pvc_name
-            sub_path = user_id
+            sub_path = (
+                user_id
+                if context_id == DEFAULT_CONTEXT_ID
+                else f"{user_id}/contexts/{context_hash(context_id)}"
+            )
 
         try:
             await core.read_namespaced_persistent_volume_claim(claim_name, ns)
@@ -429,6 +472,12 @@ class KubernetesBackend(Backend):
 
         labels = _base_labels(user_id)
         labels["openwebui.com/policy"] = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        labels[CONTEXT_TYPE_LABEL] = (
+            DEFAULT_CONTEXT_ID
+            if context_id == DEFAULT_CONTEXT_ID
+            else context_id.split(":", 1)[0]
+        )
+        labels[CONTEXT_HASH_LABEL] = context_hash(context_id)
         labels["openwebui.com/reset"] = "true"
 
         volume_mount = client.V1VolumeMount(
@@ -546,6 +595,7 @@ class KubernetesBackend(Backend):
             user_id = labels.get("openwebui.com/user-id")
             policy_slug = labels.get("openwebui.com/policy", "default")
             policy_id = annotations.get(_POLICY_ID_ANNOTATION, policy_slug)
+            context_id = normalize_context_id(annotations.get(CONTEXT_ID_ANNOTATION))
             if not user_id:
                 continue
 
@@ -553,7 +603,7 @@ class KubernetesBackend(Backend):
             name = pod.metadata.name
             self._uid_cache[uid] = name
 
-            key = self._key(user_id, policy_id)
+            key = self._key(user_id, policy_id, context_id)
             if key in self._instances:
                 continue
 
@@ -582,7 +632,7 @@ class KubernetesBackend(Backend):
                 "port": 8000,
             }
             self._specs[key] = adopted_specs[policy_id]
-            await self._seed_adopted_activity(key, user_id, policy_id)
+            await self._seed_adopted_activity(key, user_id, policy_id, context_id)
             recovered += 1
 
         if recovered:

@@ -9,6 +9,7 @@ from terminals.config import settings
 from terminals.db.session import async_session
 from terminals.routers.auth import verify_admin_api_key
 from terminals.routers.proxy import active_ws_connections
+from terminals.utils.context import DEFAULT_CONTEXT_ID
 
 router = APIRouter(prefix="/api/v1", tags=["terminals"])
 
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/api/v1", tags=["terminals"])
 class RefreshRequest(BaseModel):
     user_id: Optional[str] = None
     policy_id: Optional[str] = None
+    context_id: Optional[str] = None
     only_idle: bool = True
     reset: bool = False
 
@@ -23,6 +25,7 @@ class RefreshRequest(BaseModel):
 class StopRequest(BaseModel):
     user_id: str
     policy_id: str = "default"
+    context_id: str = DEFAULT_CONTEXT_ID
 
 
 async def _policy_count() -> int:
@@ -68,6 +71,7 @@ async def stop_terminal(request: Request, body: StopRequest):
     result = await request.app.state.backend.refresh(
         user_id=body.user_id,
         policy_id=body.policy_id,
+        context_id=body.context_id,
         only_idle=False,
         reset=False,
     )
@@ -86,6 +90,7 @@ async def refresh_terminals(request: Request, body: RefreshRequest):
     result = await request.app.state.backend.refresh(
         user_id=body.user_id,
         policy_id=body.policy_id,
+        context_id=body.context_id,
         only_idle=body.only_idle,
         reset=body.reset,
     )
