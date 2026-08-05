@@ -99,6 +99,10 @@ def _context_from_request(request: Request) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _context_from_websocket(ws: WebSocket, query_context_id: str) -> str:
+    return normalize_context_id(ws.headers.get(CONTEXT_HEADER) or query_context_id)
+
+
 # ---------------------------------------------------------------------------
 # Resolve instance
 # ---------------------------------------------------------------------------
@@ -684,7 +688,7 @@ async def ws_terminal_proxy(
     if effective_user is None:
         return
     try:
-        context_id = normalize_context_id(context_id)
+        context_id = _context_from_websocket(ws, context_id)
     except ValueError as exc:
         await ws.close(code=4004, reason=str(exc))
         return
@@ -706,7 +710,7 @@ async def ws_policy_terminal_proxy(
 
     try:
         _id, spec = await _resolve_policy_spec(policy_id)
-        context_id = normalize_context_id(context_id)
+        context_id = _context_from_websocket(ws, context_id)
     except HTTPException:
         await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
         return
