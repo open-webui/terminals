@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     ws_compression: bool = False
     access_log: bool = False
     replay_body_limit: int | None = None
+    proxy_connect_timeout_seconds: float = 10
+    proxy_read_timeout_seconds: float = 360
+    proxy_write_timeout_seconds: float = 300
+    proxy_pool_timeout_seconds: float = 300
 
     @field_validator("replay_body_limit", mode="before")
     @classmethod

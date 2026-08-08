@@ -173,6 +173,10 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links — per-frame compression is CPU-expensive at high session counts. |
 | `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default: at high request rates the per-request log record is measurable CPU. |
 | `TERMINALS_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. When set, larger known-size request bodies are streamed one-shot instead of buffered in orchestrator memory. |
+| `TERMINALS_PROXY_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for opening upstream proxy connections to terminal containers. |
+| `TERMINALS_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Keep above Open Terminal's maximum `/execute?wait` value. |
+| `TERMINALS_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream. |
+| `TERMINALS_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool. |
 
 See [`config.py`](terminals/config.py) for the full list.
 

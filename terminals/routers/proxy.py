@@ -48,7 +48,12 @@ async def _get_proxy_client(host: str, port: int) -> httpx.AsyncClient:
     client = _proxy_clients.pop((host, port), None)
     if client is None:
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(
+                connect=settings.proxy_connect_timeout_seconds,
+                read=settings.proxy_read_timeout_seconds,
+                write=settings.proxy_write_timeout_seconds,
+                pool=settings.proxy_pool_timeout_seconds,
+            ),
             limits=httpx.Limits(
                 max_connections=32,
                 max_keepalive_connections=4,
@@ -239,6 +244,17 @@ async def _proxy_request(
                     status_code=502,
                     media_type="application/json",
                 )
+        except httpx.ReadTimeout as e:
+            logger.warning(
+                "Proxy request to {} timed out waiting for upstream response: {}",
+                target_url,
+                e,
+            )
+            return Response(
+                content='{"error": "Upstream response timed out"}',
+                status_code=504,
+                media_type="application/json",
+            )
         except (httpx.RemoteProtocolError, httpx.ReadError) as e:
             request.app.state.backend.invalidate_status(
                 user_id, policy_id, context_id
