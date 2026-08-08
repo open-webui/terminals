@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-08
+
+### Added
+- Added support for separate terminals per saved chat and per automation run. Open WebUI `0.11.1` or newer is required to use this from Open WebUI.
+- Added storage and restart recovery for shared terminals, chat terminals, and automation terminals across Docker, Kubernetes, and Kubernetes operator deployments.
+- Added Kubernetes pod customization for cluster requirements like Kata Containers, sidecars, extra mounts, volumes, service accounts, labels, and annotations.
+- Added context targeting to admin refresh and stop actions, so admins can refresh or stop one shared, chat, or automation terminal without touching the others for the same user and policy.
+
+### Changed
+- Existing Open Terminal and Open WebUI connections still use one shared terminal unless Open WebUI sends a chat or automation context.
+- Missing, empty, and `default` context values all use the shared terminal.
+- Proxy timeout settings are configurable, and the default read timeout now gives Open Terminal `/execute?wait=300` enough room to finish.
+
+### Fixed
+- Fixed long-running `/execute` calls near the old 300 second proxy limit. They get more time by default, and Terminals returns a clear timeout response if the terminal still does not answer.
+
 ## [0.1.0] - 2026-07-21
 
 ### Added

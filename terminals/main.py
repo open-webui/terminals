@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Terminals",
     description="Multi-tenant terminal orchestrator for Open Terminal.",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     openapi_url=None,  # Disable built-in OpenAPI; proxy router serves the terminal spec
 )
