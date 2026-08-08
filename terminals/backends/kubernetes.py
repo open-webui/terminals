@@ -81,6 +81,92 @@ def _base_labels(user_id: str) -> dict[str, str]:
     return labels
 
 
+def _deep_merge(*items: dict | None) -> dict:
+    result = {}
+    for item in items:
+        if not item:
+            continue
+        for key, value in item.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = _deep_merge(result[key], value)
+            else:
+                result[key] = value
+    return result
+
+
+def _merge_by_name(base: list[dict] | None, override: list[dict] | None) -> list[dict]:
+    result = [dict(item) for item in base or []]
+    indexes = {
+        item.get("name"): index
+        for index, item in enumerate(result)
+        if isinstance(item, dict) and item.get("name")
+    }
+    for item in override or []:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        name = item.get("name")
+        if name and name in indexes:
+            result[indexes[name]] = _deep_merge(result[indexes[name]], item)
+        else:
+            if name:
+                indexes[name] = len(result)
+            result.append(dict(item))
+    return result
+
+
+def _apply_pod_template(pod_manifest: dict, pod_template: dict | None) -> dict:
+    if not isinstance(pod_template, dict):
+        return pod_manifest
+
+    template_metadata = pod_template.get("metadata") or {}
+    if isinstance(template_metadata, dict):
+        metadata = pod_manifest["metadata"]
+        merged_metadata = _deep_merge(template_metadata, metadata)
+        merged_metadata["labels"] = _deep_merge(
+            template_metadata.get("labels"), metadata.get("labels")
+        )
+        if template_metadata.get("annotations") or metadata.get("annotations"):
+            merged_metadata["annotations"] = _deep_merge(
+                template_metadata.get("annotations"), metadata.get("annotations")
+            )
+        merged_metadata["name"] = metadata["name"]
+        merged_metadata["namespace"] = metadata["namespace"]
+        pod_manifest["metadata"] = merged_metadata
+
+    template_spec = pod_template.get("spec") or {}
+    if isinstance(template_spec, dict):
+        generated_spec = pod_manifest["spec"]
+        merged_spec = _deep_merge(template_spec, generated_spec)
+        containers = _merge_by_name(
+            template_spec.get("containers"), generated_spec.get("containers")
+        )
+        for container in containers:
+            if container.get("name") == "open-terminal":
+                template_container = next(
+                    (
+                        item
+                        for item in template_spec.get("containers") or []
+                        if item.get("name") == "open-terminal"
+                    ),
+                    {},
+                )
+                generated_container = generated_spec["containers"][0]
+                for field in ("env", "ports", "volumeMounts"):
+                    container[field] = _merge_by_name(
+                        template_container.get(field), generated_container.get(field)
+                    )
+                break
+        merged_spec["containers"] = containers
+        if template_spec.get("volumes") or generated_spec.get("volumes"):
+            merged_spec["volumes"] = _merge_by_name(
+                template_spec.get("volumes"), generated_spec.get("volumes")
+            )
+        pod_manifest["spec"] = merged_spec
+
+    return pod_manifest
+
+
 class KubernetesBackend(Backend):
     """Manage terminal instances as Kubernetes Pods + Services."""
 
@@ -315,6 +401,10 @@ class KubernetesBackend(Backend):
                 restart_policy="Always",
                 security_context=pod_security or None,
             ),
+        )
+        pod = _apply_pod_template(
+            api_client.sanitize_for_serialization(pod),
+            s.get("pod_template") or s.get("podTemplate"),
         )
 
         try:
