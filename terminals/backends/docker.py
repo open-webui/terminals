@@ -23,6 +23,7 @@ from terminals.utils.context import (
     normalize_context_id,
 )
 from terminals.utils.env import build_terminal_env
+from terminals.utils.docker_mounts import parse_docker_mounts
 from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class DockerBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._docker: Optional[aiodocker.Docker] = None
+        self._mounts = parse_docker_mounts(settings.docker_mounts)
 
     async def _get_docker(self) -> aiodocker.Docker:
         if self._docker is None:
@@ -65,8 +67,8 @@ class DockerBackend(Backend):
     def _home_dir(user_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> Path:
         context_id = normalize_context_id(context_id)
         if context_id == DEFAULT_CONTEXT_ID:
-            return Path(settings.data_dir) / user_id
-        return Path(settings.data_dir) / user_id / "contexts" / context_hash(context_id)
+            return Path(settings.docker_data_dir) / user_id
+        return Path(settings.docker_data_dir) / user_id / "contexts" / context_hash(context_id)
 
     # ------------------------------------------------------------------
     # Backend interface
@@ -87,7 +89,7 @@ class DockerBackend(Backend):
         s = spec or {}
 
         image = s.get("image", settings.image)
-        networks = [name.strip() for name in settings.network.split(",") if name.strip()]
+        networks = [name.strip() for name in settings.docker_network.split(",") if name.strip()]
         network_name = None
         if len(networks) == 1:
             network_name = networks[0]
@@ -99,6 +101,8 @@ class DockerBackend(Backend):
             "Binds": [f"{host_data_dir}:/home/user"],
             "PublishAllPorts": True,
         }
+        if self._mounts:
+            host_config["Mounts"] = self._mounts
         if (settings.log_level or "").strip().upper() in _QUIET_LOG_LEVELS:
             host_config["LogConfig"] = {"Type": "none"}
 
@@ -248,7 +252,7 @@ class DockerBackend(Backend):
 
         # When using a custom Docker network, containers can reach each other
         # by name.  Otherwise, use the published port on the Docker host.
-        if settings.network:
+        if settings.docker_network:
             host = instance_name
             port = 8000
         else:

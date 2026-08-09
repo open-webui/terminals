@@ -3,7 +3,7 @@
 from typing import Any
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Root data directory lives next to the *package* directory so that the
@@ -26,9 +26,16 @@ class Settings(BaseSettings):
 
     # Docker settings
     image: str = "ghcr.io/open-webui/open-terminal:latest"
-    network: str = ""
+    docker_network: str = Field(
+        default="",
+        validation_alias=AliasChoices("TERMINALS_DOCKER_NETWORK", "TERMINALS_NETWORK"),
+    )
     docker_host: str = "127.0.0.1"  # address to reach published container ports
-    data_dir: str = f"{_DEFAULT_DATA_DIR}/terminals"
+    docker_mounts: str = ""          # JSON array of extra Docker bind mounts
+    docker_data_dir: str = Field(
+        default=f"{_DEFAULT_DATA_DIR}/terminals",
+        validation_alias=AliasChoices("TERMINALS_DOCKER_DATA_DIR", "TERMINALS_DATA_DIR"),
+    )
 
     port: int = 3000
     host: str = "0.0.0.0"
@@ -59,7 +66,7 @@ class Settings(BaseSettings):
 
     # Kubernetes settings
     kubernetes_namespace: str = "terminals"
-    kubernetes_image: str = "ghcr.io/open-webui/open-terminal:latest"
+    kubernetes_image: str = ""                    # optional override; falls back to image
     kubernetes_storage_class: str = ""        # empty = cluster default
     kubernetes_storage_size: str = "1Gi"
     kubernetes_storage_mode: str = "per-user"  # per-user, shared, shared-rwo
@@ -85,6 +92,10 @@ class Settings(BaseSettings):
     max_memory: str = ""           # TERMINALS_MAX_MEMORY
     max_storage: str = ""          # TERMINALS_MAX_STORAGE
     allowed_images: str = ""       # TERMINALS_ALLOWED_IMAGES (comma-separated globs)
+
+    @property
+    def effective_kubernetes_image(self) -> str:
+        return self.kubernetes_image or self.image
 
 
 settings = Settings()

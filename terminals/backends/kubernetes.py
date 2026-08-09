@@ -219,7 +219,7 @@ class KubernetesBackend(Backend):
             CONTEXT_ID_ANNOTATION: context_id,
         }
 
-        image = s.get("image", settings.kubernetes_image)
+        image = s.get("image", settings.effective_kubernetes_image)
         storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
         storage_size = s.get("storage", settings.kubernetes_storage_size)
 

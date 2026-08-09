@@ -108,6 +108,48 @@ curl -X POST http://localhost:3000/p/data-science/execute \
 > [!NOTE]
 > **Storage limits are fully enforced only on the Kubernetes backends** (via sized PVCs). On the `docker` backend, `storage` (and `TERMINALS_MAX_STORAGE`) caps the container's *writable layer* via Docker's `StorageOpt`, which requires a storage driver that supports it (e.g. overlay2 on XFS with the `pquota` mount option). On unsupported drivers such as overlay2-on-ext4, Terminals logs a warning and provisions without the limit. The persistent `/home/user` directory is bind-mounted from the host and is **not** quota-limited on Docker. Use a Kubernetes backend if you need hard per-user storage caps.
 
+### Extra mounts: Docker vs Kubernetes
+
+Docker deployments can use `TERMINALS_DOCKER_MOUNTS` to mount shared data into
+every spawned terminal container:
+
+```bash
+TERMINALS_DOCKER_MOUNTS='[
+  {"source": "/srv/datasets", "target": "/mnt/datasets", "readOnly": true},
+  {"source": "/srv/shared-work", "target": "/workspace/shared", "readOnly": false}
+]'
+```
+
+`source` is an absolute path on the Docker daemon host. `target` is the absolute
+container path. `readOnly` defaults to `true`. Do not mount over `/home/user`;
+Open Terminal expects that directory to stay writable.
+
+Kubernetes deployments do not use `TERMINALS_DOCKER_MOUNTS`. Use the existing
+policy `podTemplate` field and native Kubernetes volumes instead:
+
+```json
+{
+  "podTemplate": {
+    "spec": {
+      "containers": [
+        {
+          "name": "open-terminal",
+          "volumeMounts": [
+            {"name": "datasets", "mountPath": "/mnt/datasets", "readOnly": true}
+          ]
+        }
+      ],
+      "volumes": [
+        {"name": "datasets", "persistentVolumeClaim": {"claimName": "datasets"}}
+      ]
+    }
+  }
+}
+```
+
+Read-only mounts prevent writes through that mount, but they are not a security
+boundary if terminal containers are privileged or can access the Docker socket.
+
 ### Policy lifecycle
 
 Policies define what gets provisioned. Policy lifecycle config defines ongoing maintenance for that policy, such as scheduled resets of persisted terminal files. Due resets refresh matching terminals even when they are still running, so long-lived browser sessions do not block scheduled cleanup.
@@ -147,44 +189,77 @@ interrupted.
 
 All settings are configured through environment variables prefixed with `TERMINALS_`, or via a `.env` file.
 
+### Common settings
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-operator` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
+| `TERMINALS_OPEN_WEBUI_URL` | | Open WebUI base URL. If set, Terminals validates Open WebUI JWTs against that instance. |
+| `TERMINALS_HOST` | `0.0.0.0` | Orchestrator API bind host |
+| `TERMINALS_PORT` | `3000` | Orchestrator API bind port |
 | `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
 | `TERMINALS_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
-| `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default container image |
-| `TERMINALS_NETWORK` | | Docker network for terminal containers. Use a comma-separated list to shard terminals across multiple Docker bridge networks. |
-| `TERMINALS_MAX_CPU` | | Hard cap on CPU per container |
-| `TERMINALS_MAX_MEMORY` | | Hard cap on memory per container |
-| `TERMINALS_MAX_STORAGE` | | Hard cap on storage per container |
+| `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default Open Terminal container image |
+| `TERMINALS_MAX_CPU` | | Hard cap on CPU per terminal container/pod |
+| `TERMINALS_MAX_MEMORY` | | Hard cap on memory per terminal container/pod |
+| `TERMINALS_MAX_STORAGE` | | Storage cap. Kubernetes enforces this with PVC sizes; Docker support depends on the storage driver and does not quota the bind-mounted `/home/user`. |
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
-| `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | `per-user`, `shared`, or `shared-rwo` |
-| `TERMINALS_KUBERNETES_RESTRICTED` | `false` | Enable restricted Kubernetes/OpenShift pod defaults globally |
-| `TERMINALS_KUBERNETES_POD_SECURITY_CONTEXT` | | JSON pod security context merged into Kubernetes terminal pods |
-| `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into Kubernetes terminal containers |
-| `TERMINALS_KUBERNETES_NODE_SELECTOR` | | Node selector for Kubernetes terminal and reset pods, as JSON or `k=v,k2=v2` |
-| `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of Kubernetes tolerations for terminal and reset pods |
+| `TERMINALS_IDLE_TIMEOUT_MINUTES` | `0` | Minutes of inactivity before terminals are torn down. `0` disables idle cleanup. |
 | `TERMINALS_IDLE_CLEANUP_TIMEOUT_SECONDS` | `120` | Timeout for each teardown/reset call during idle cleanup |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
-| `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. The cache is invalidated immediately when a proxied connection fails. |
-| `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only), avoiding one Open WebUI round trip per proxied request. A revoked token stays usable for up to the TTL; `0` validates every request. |
-| `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links — per-frame compression is CPU-expensive at high session counts. |
-| `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default: at high request rates the per-request log record is measurable CPU. |
-| `TERMINALS_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. When set, larger known-size request bodies are streamed one-shot instead of buffered in orchestrator memory. |
-| `TERMINALS_PROXY_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for opening upstream proxy connections to terminal containers. |
+| `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. |
+| `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only). A revoked token stays usable for up to the TTL; `0` validates every request. |
+| `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links. |
+| `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default because per-request logging is expensive at high request rates. |
+| `TERMINALS_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. |
+| `TERMINALS_PROXY_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for opening upstream proxy connections to terminal containers |
 | `TERMINALS_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Keep above Open Terminal's maximum `/execute?wait` value. |
-| `TERMINALS_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream. |
-| `TERMINALS_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool. |
+| `TERMINALS_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream |
+| `TERMINALS_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool |
 
-See [`config.py`](terminals/config.py) for the full list.
+### Docker-only settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TERMINALS_DOCKER_HOST` | `127.0.0.1` | Host/IP that the orchestrator uses to reach published terminal container ports |
+| `TERMINALS_DOCKER_NETWORK` | | Docker network for terminal containers. Use a comma-separated list to shard terminals across multiple Docker bridge networks. |
+| `TERMINALS_DOCKER_MOUNTS` | | JSON array of extra bind mounts with `source`, `target`, and optional `readOnly` |
+| `TERMINALS_DOCKER_DATA_DIR` | `data/terminals` | Host directory for per-user `/home/user` bind mounts |
+
+### Kubernetes-only settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TERMINALS_KUBERNETES_NAMESPACE` | `terminals` | Namespace for terminal pods, services, PVCs, and CRDs |
+| `TERMINALS_KUBERNETES_STORAGE_CLASS` | | Storage class for terminal PVCs. Empty uses the cluster default. |
+| `TERMINALS_KUBERNETES_STORAGE_SIZE` | `1Gi` | Default PVC size when a policy does not set `storage` |
+| `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | Storage mode: `per-user`, `shared`, or `shared-rwo` |
+| `TERMINALS_KUBERNETES_SERVICE_TYPE` | `ClusterIP` | Service type for terminal services |
+| `TERMINALS_KUBERNETES_KUBECONFIG` | | Kubeconfig path. Empty uses in-cluster config. |
+| `TERMINALS_KUBERNETES_LABELS` | | Extra labels for terminal resources, as `k=v,k2=v2` |
+| `TERMINALS_KUBERNETES_RESTRICTED` | `false` | Enable restricted Kubernetes/OpenShift pod defaults globally |
+| `TERMINALS_KUBERNETES_POD_SECURITY_CONTEXT` | | JSON pod security context merged into terminal pods |
+| `TERMINALS_KUBERNETES_CONTAINER_SECURITY_CONTEXT` | | JSON container security context merged into terminal containers |
+| `TERMINALS_KUBERNETES_NODE_SELECTOR` | | Node selector for terminal and reset pods, as JSON or `k=v,k2=v2` |
+| `TERMINALS_KUBERNETES_TOLERATIONS` | | JSON array of tolerations for terminal and reset pods |
+
+### Kubernetes-operator-only settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TERMINALS_KUBERNETES_CRD_GROUP` | `openwebui.com` | Terminal CRD API group |
+| `TERMINALS_KUBERNETES_CRD_VERSION` | `v1alpha1` | Terminal CRD API version |
+
+These tables are the public environment-variable surface. Compatibility-only
+settings may still be accepted by the code but are intentionally omitted.
 
 By default, known-size proxied request bodies are buffered so retry behavior is preserved. Set `TERMINALS_REPLAY_BODY_LIMIT` to stream request bodies above that byte limit instead of buffering them in orchestrator memory. Chunked uploads are always streamed one-shot and are not retried.
 
 ### Docker bridge scaling
 
-Docker documents that bridge networks can become unstable when 1000 or more containers connect to a single network. For larger single-node Docker deployments, create multiple bridge networks and set `TERMINALS_NETWORK` to a comma-separated list; Terminals assigns each user/policy terminal to a stable network shard. The orchestrator container must be attached to every listed network so it can reach terminals by container name.
+Docker documents that bridge networks can become unstable when 1000 or more containers connect to a single network. For larger single-node Docker deployments, create multiple bridge networks and set `TERMINALS_DOCKER_NETWORK` to a comma-separated list; Terminals assigns each user/policy terminal to a stable network shard. The orchestrator container must be attached to every listed network so it can reach terminals by container name.
 
 ## Authentication
 

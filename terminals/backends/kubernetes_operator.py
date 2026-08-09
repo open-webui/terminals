@@ -159,7 +159,7 @@ class KubernetesOperatorBackend(Backend):
         ns = settings.kubernetes_namespace
         s = spec or {}
 
-        image = s.get("image", settings.kubernetes_image)
+        image = s.get("image", settings.effective_kubernetes_image)
         storage_size = s.get("storage")  # absent = ephemeral
 
         # Build CRD spec aligned with manifests/terminal-crd.yaml.
