@@ -195,7 +195,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 |----------|---------|-------------|
 | `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-operator` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
-| `TERMINALS_OPEN_WEBUI_URL` | | Open WebUI base URL. If set, Terminals validates Open WebUI JWTs against that instance. Open WebUI terminal connections should use session auth for this mode. |
+| `TERMINALS_OPEN_WEBUI_URL` | | Advanced Open WebUI integration mode. If set, Terminals validates Open WebUI JWTs against that instance. Requires an Open WebUI terminal connection using session auth. |
 | `TERMINALS_HOST` | `0.0.0.0` | Orchestrator API bind host |
 | `TERMINALS_PORT` | `3000` | Orchestrator API bind port |
 | `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
