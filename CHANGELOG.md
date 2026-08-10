@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-09
+
+### Added
+- Added Docker extra mounts. Operators can mount shared folders, datasets, and team workspaces into every spawned terminal with `TERMINALS_DOCKER_MOUNTS`.
+- Added read-only mount support for Docker extra mounts. Read-only is the default, so shared datasets are protected unless an operator explicitly allows writes.
+- Added clear Docker and Kubernetes mount guidance. Docker uses `TERMINALS_DOCKER_MOUNTS`; Kubernetes uses policy `podTemplate` volumes and volume mounts.
+
+### Changed
+- Renamed Docker-only settings so their purpose is clear: use `TERMINALS_DOCKER_NETWORK` and `TERMINALS_DOCKER_DATA_DIR`. The old names still work for existing deployments.
+- Split the configuration docs into common, Docker-only, Kubernetes-only, and Kubernetes-operator-only sections.
+- Kubernetes now uses `TERMINALS_IMAGE` as the normal image setting, matching Docker. The older Kubernetes image override still works for existing deployments.
+- Documented `TERMINALS_OPEN_WEBUI_URL` as an advanced Open WebUI JWT mode that requires session auth from Open WebUI.
+
+### Fixed
+- Blocked Docker extra mounts from replacing important container paths such as `/home/user`, `/etc`, `/usr`, and `/var`.
+- Blocked duplicate or nested Docker mount targets so one mount cannot hide another.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
