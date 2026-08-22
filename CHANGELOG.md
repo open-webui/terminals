@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-08-22
+
+### Fixed
+- Fixed PostgreSQL support so fresh installs include the needed database drivers.
+- Fixed `postgres://` and `postgresql://` database URLs so they work without operators having to know the exact driver name.
+- Fixed startup and migration failures when PostgreSQL passwords contain URL-escaped characters like `%25`, `%7D`, `%3A`, or `%26`.
+
 ## [0.2.1] - 2026-08-09
 
 ### Added
