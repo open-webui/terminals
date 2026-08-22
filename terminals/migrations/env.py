@@ -11,6 +11,7 @@ from alembic import context
 from sqlalchemy import pool
 
 from terminals.config import settings
+from terminals.db.urls import sync_database_url
 
 # Import *all* models so Base.metadata is fully populated.
 from terminals.models.base import Base  # noqa: F401
@@ -34,10 +35,7 @@ def _get_url() -> str:
 
 def _sync_url(url: str) -> str:
     """Convert an async URL to a sync one for offline migrations."""
-    return (
-        url.replace("sqlite+aiosqlite", "sqlite")
-        .replace("postgresql+asyncpg", "postgresql")
-    )
+    return sync_database_url(url)
 
 
 def _ensure_sqlite_dir(url: str) -> None:

@@ -100,9 +100,6 @@ def _alembic_cfg():
         str(Path(__file__).resolve().parent / "migrations"),
     )
 
-    from terminals.config import settings
-
-    cfg.set_main_option("sqlalchemy.url", settings.database_url)
     return cfg
 
 
