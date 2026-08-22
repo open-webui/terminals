@@ -4,11 +4,12 @@ import os
 from pathlib import Path
 
 from terminals.config import settings
+from terminals.db.urls import async_database_url
 
 engine = None
 async_session = None
 
-_db_url = settings.database_url
+_db_url = async_database_url(settings.database_url)
 if _db_url:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -35,13 +36,6 @@ def init_db():
     migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
     alembic_cfg.set_main_option("script_location", str(migrations_dir))
 
-    # Use sync URL for alembic (env.py uses sync engine).
-    sync_url = settings.database_url.replace(
-        "sqlite+aiosqlite", "sqlite"
-    ).replace(
-        "postgresql+asyncpg", "postgresql"
-    )
-    alembic_cfg.set_main_option("sqlalchemy.url", sync_url)
     command.upgrade(alembic_cfg, "head")
 
 
