@@ -178,11 +178,12 @@ async def create_policy(body: PolicyCreate):
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail=f"Policy '{body.id}' already exists")
 
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         policy = Policy(
             id=body.id,
             data=clamped,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=now,
+            updated_at=now,
         )
         session.add(policy)
         await session.commit()
@@ -260,13 +261,14 @@ async def upsert_policy(policy_id: str, body: PolicyData):
 
         if policy:
             policy.data = clamped
-            policy.updated_at = datetime.now(timezone.utc)
+            policy.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         else:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             policy = Policy(
                 id=policy_id,
                 data=clamped,
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=now,
+                updated_at=now,
             )
             session.add(policy)
 

@@ -154,6 +154,12 @@ boundary if terminal containers are privileged or can access the Docker socket.
 
 Policies define what gets provisioned. Policy lifecycle config defines ongoing maintenance for that policy, such as scheduled resets of persisted terminal files. Due resets refresh matching terminals even when they are still running, so long-lived browser sessions do not block scheduled cleanup.
 
+Use policy lifecycle resets for enterprise workspace retention. Open Terminal
+containers need a real filesystem for commands and file APIs, so Open WebUI's
+file storage provider and Azure Blob cleanup do not manage terminal workspace
+contents. Put terminal homes on the backend storage for this service, then reset
+them through Terminals policy lifecycle.
+
 ```bash
 curl -X PUT http://localhost:3000/api/v1/policies/data-science/lifecycle \
   -H "Authorization: Bearer $API_KEY" \
@@ -167,6 +173,16 @@ curl -X PUT http://localhost:3000/api/v1/policies/data-science/lifecycle \
 ```
 
 Reset schedules support one-time ISO datetimes, `@weekly`, `@monthly`, and 5-field cron expressions.
+
+Backend reset behavior:
+
+- Docker removes the matching user's bind-mounted home directory contents under `TERMINALS_DOCKER_DATA_DIR`.
+- Kubernetes runs a reset pod that clears `/home/user` on the matching PVC or shared-PVC subPath.
+- Kubernetes operator runs a reset pod that clears the Terminal CR's PVC.
+
+For Azure deployments, use Azure Files, managed disks, or Kubernetes PVCs for
+terminal homes. Azure Blob is suitable for Open WebUI uploaded file records, not
+as the live filesystem used by a running terminal.
 
 ### Applying policy changes
 
