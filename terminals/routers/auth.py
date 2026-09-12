@@ -103,6 +103,7 @@ async def verify_api_key(
 
 async def verify_admin_api_key(
     authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ) -> None:
     """Validate admin control-plane access.
 
@@ -110,6 +111,11 @@ async def verify_admin_api_key(
     administration. When Open WebUI auth is enabled, callers must still use
     the Terminals admin API key.
     """
+    # Trusted proxies set X-User-Id themselves when delegating user requests
+    # with the shared key. Those requests must not inherit admin privileges.
+    if x_user_id is not None:
+        raise HTTPException(status_code=403, detail="User-scoped requests cannot access admin APIs")
+
     if settings.api_key:
         if not authorization:
             raise HTTPException(status_code=401, detail="Missing Authorization header")
