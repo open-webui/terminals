@@ -66,6 +66,23 @@ def _sanitize_name(
     return name
 
 
+def _is_serving(status: dict) -> bool:
+    """True when the CR advertises a pod that is actually able to serve.
+
+    ``phase`` alone is not enough: the operator flips the ``Ready`` condition
+    the moment a pod is deleted or starts terminating, so honouring it keeps
+    the proxy from routing to a Service with no endpoints.
+    """
+    if status.get("phase") != "Running":
+        return False
+    if not status.get("serviceUrl") or not status.get("apiKeySecret"):
+        return False
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Ready":
+            return condition.get("status") == "True"
+    return True
+
+
 class KubernetesOperatorBackend(Backend):
     """Manage terminal instances via Terminal CRDs.
 
@@ -379,14 +396,17 @@ class KubernetesOperatorBackend(Backend):
         log.warning("Terminal CR %s still exists after %ds wait", name, timeout)
 
     async def _wait_for_ready(
-        self, name: str, namespace: str, timeout: int = 120
+        self, name: str, namespace: str, timeout: int | None = None
     ) -> Optional[dict]:
         """Poll the CR status until Running with serviceUrl and apiKeySecret.
 
-        Returns a dict with ``service_url`` and ``api_key``, or None on timeout.
+        Returns a dict with ``service_url`` and ``api_key``, or None on timeout
+        or if the CR is deleted while we wait.
         """
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
+        if timeout is None:
+            timeout = settings.terminal_ready_timeout
 
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
@@ -398,20 +418,21 @@ class KubernetesOperatorBackend(Backend):
                     plural=self._plural,
                     name=name,
                 )
-                status = cr.get("status", {})
-                if (
-                    status.get("phase") == "Running"
-                    and status.get("serviceUrl")
-                    and status.get("apiKeySecret")
-                ):
-                    api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-                    if api_key:
-                        return {
-                            "service_url": status["serviceUrl"],
-                            "api_key": api_key,
-                        }
-            except client.exceptions.ApiException:
-                pass
+            except client.exceptions.ApiException as e:
+                if e.status == 404:
+                    log.warning("Terminal CR %s vanished while waiting for it", name)
+                    return None
+                await asyncio.sleep(2)
+                continue
+
+            status = cr.get("status") or {}
+            if _is_serving(status):
+                api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+                if api_key:
+                    return {
+                        "service_url": status["serviceUrl"],
+                        "api_key": api_key,
+                    }
             await asyncio.sleep(2)
 
         log.warning(
@@ -651,7 +672,7 @@ class KubernetesOperatorBackend(Backend):
         name = cr["metadata"]["name"]
         ns = settings.kubernetes_namespace
 
-        ready = await self._wait_for_ready(name, ns, timeout=120)
+        ready = await self._wait_for_ready(name, ns)
         if ready:
             host, port = self._parse_service_url(ready["service_url"])
             return {
@@ -755,6 +776,49 @@ class KubernetesOperatorBackend(Backend):
     # Operator-aware ensure_terminal
     # ------------------------------------------------------------------
 
+    async def _connect_info(self, cr: dict) -> Optional[dict]:
+        """Connection details for a CR, or ``None`` if it isn't serving yet."""
+        status = cr.get("status") or {}
+        if not _is_serving(status):
+            return None
+        api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+        if not api_key:
+            return None
+        host, port = self._parse_service_url(status["serviceUrl"])
+        return {
+            "instance_id": cr["metadata"]["uid"],
+            "instance_name": cr["metadata"]["name"],
+            "api_key": api_key,
+            "host": host,
+            "port": port,
+        }
+
+    def _remember(
+        self, key: tuple[str, str, str], info: dict, spec: Optional[dict]
+    ) -> None:
+        self._instances[key] = info
+        self._specs[key] = spec or {}
+        self._running_checked_at[key] = time.monotonic()
+        self._record_activity(key)
+
+    async def _reprovision(
+        self,
+        key: tuple[str, str, str],
+        user_id: str,
+        policy_id: str,
+        context_id: str,
+        spec: Optional[dict],
+    ) -> Optional[dict]:
+        """Drop the current CR and provision a fresh one."""
+        await self._delete_terminal_cr(user_id, policy_id, context_id=context_id)
+        await self._apply_due_reset(user_id, policy_id, context_id, spec)
+        info = await self.provision(
+            user_id, policy_id=policy_id, context_id=context_id, spec=spec
+        )
+        if info:
+            self._remember(key, info, spec)
+        return info
+
     async def ensure_terminal(
         self,
         user_id: str,
@@ -784,24 +848,10 @@ class KubernetesOperatorBackend(Backend):
         # Fast path: check if CR is already Running without taking the lock.
         cr = await self._get_terminal_cr(user_id, policy_id, context_id)
         if cr:
-            status = cr.get("status") or {}
-            phase = status.get("phase")
-            if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
-                api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-                if api_key:
-                    host, port = self._parse_service_url(status["serviceUrl"])
-                    info = {
-                        "instance_id": cr["metadata"]["uid"],
-                        "instance_name": cr["metadata"]["name"],
-                        "api_key": api_key,
-                        "host": host,
-                        "port": port,
-                    }
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                    return info
+            info = await self._connect_info(cr)
+            if info:
+                self._remember(key, info, spec)
+                return info
 
         # Serialise provisioning per key.
         if key not in self._locks:
@@ -817,54 +867,36 @@ class KubernetesOperatorBackend(Backend):
                     user_id, policy_id=policy_id, context_id=context_id, spec=spec
                 )
                 if info:
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
+                    self._remember(key, info, spec)
                 return info
 
             status = cr.get("status") or {}
             phase = status.get("phase")
 
             if phase in ("Idle", "Error"):
+                # Idle culling removes the pod on purpose and the operator
+                # deliberately won't bring it back; Error means the pod itself
+                # went bad.  Either way, re-create the CR.  A pod that merely
+                # went missing lands in Pending instead and is repaired below.
                 log.info(
                     "Terminal CR %s in phase %s, deleting before refresh",
                     cr["metadata"]["name"],
                     phase,
                 )
-                await self._delete_terminal_cr(user_id, policy_id, context_id=context_id)
-                await self._apply_due_reset(user_id, policy_id, context_id, spec)
-                info = await self.provision(
-                    user_id, policy_id=policy_id, context_id=context_id, spec=spec
+                return await self._reprovision(
+                    key, user_id, policy_id, context_id, spec
                 )
-                if info:
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
+
+            info = await self._connect_info(cr)
+            if info:
+                self._remember(key, info, spec)
                 return info
 
-            if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
-                api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-                if api_key:
-                    host, port = self._parse_service_url(status["serviceUrl"])
-                    info = {
-                        "instance_id": cr["metadata"]["uid"],
-                        "instance_name": cr["metadata"]["name"],
-                        "api_key": api_key,
-                        "host": host,
-                        "port": port,
-                    }
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                    return info
-
-            # Still provisioning — wait for the operator to bring it up
+            # Provisioning, or recovering from a lost pod — the operator
+            # reconciler re-creates missing children, so wait it out.
             name = cr["metadata"]["name"]
             ns = settings.kubernetes_namespace
-            ready = await self._wait_for_ready(name, ns, timeout=120)
+            ready = await self._wait_for_ready(name, ns)
             if ready:
                 host, port = self._parse_service_url(ready["service_url"])
                 info = {
@@ -874,36 +906,20 @@ class KubernetesOperatorBackend(Backend):
                     "host": host,
                     "port": port,
                 }
-                self._instances[key] = info
-                self._specs[key] = spec or {}
-                self._running_checked_at[key] = time.monotonic()
-                self._record_activity(key)
+                self._remember(key, info, spec)
                 return info
 
-            return None
+            # The operator could not repair it in time; rebuild from scratch
+            # rather than leaving the caller pointed at a dead endpoint.
+            log.warning("Terminal CR %s stuck in phase %s, re-creating", name, phase)
+            return await self._reprovision(key, user_id, policy_id, context_id, spec)
 
     async def get_terminal_info(self, user_id: str) -> Optional[dict]:
         """Look up an existing terminal from the K8s CRD without creating one."""
         cr = await self._get_terminal_cr(user_id)
         if cr is None:
             return None
-
-        status = cr.get("status") or {}
-        phase = status.get("phase")
-
-        if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
-            api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-            if api_key:
-                host, port = self._parse_service_url(status["serviceUrl"])
-                return {
-                    "instance_id": cr["metadata"]["uid"],
-                    "instance_name": cr["metadata"]["name"],
-                    "api_key": api_key,
-                    "host": host,
-                    "port": port,
-                }
-
-        return None
+        return await self._connect_info(cr)
 
     async def touch_activity(
         self,

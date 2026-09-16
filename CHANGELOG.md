@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Operator: a terminal pod that is deleted, evicted, or lost with its node is now re-created. Previously only the initial `Terminal` creation built the pod, so the pod stayed gone while the resource still reported `Running`, and the orchestrator kept proxying to a Service with no endpoints until the session was abandoned. Pods removed by the idle timeout are still left down on purpose.
+- Operator: `Terminal` status updates now send `application/merge-patch+json`. The client otherwise defaults to `application/json-patch+json`, which rejects the patch body, so pod state could silently fail to reach the resource.
+- Operator: a pod that is shutting down no longer keeps the terminal marked `Running` for the whole termination grace period.
+- Operator: `TERMINALS_KUBERNETES_NODE_SELECTOR` and `TERMINALS_KUBERNETES_TOLERATIONS` are parsed once at startup instead of on every pod build, so a malformed value stops the operator with an error naming the variable rather than being re-raised out of every reconcile sweep while no pod is ever created.
+- The `kubernetes-operator` backend now honours the `Ready` condition instead of `phase` alone, and re-creates a `Terminal` that never becomes ready instead of failing every request from then on.
+
+### Added
+- `TERMINALS_RECONCILE_INTERVAL_SECONDS` (operator, default `15`) sets how often each non-idle `Terminal` is checked for missing child resources.
+- `TERMINALS_TERMINAL_READY_TIMEOUT` (default `120`) sets how long the orchestrator waits for a `Terminal` to report `Running` before re-creating it.
+
 ## [0.2.4] - 2026-09-12
 
 ### Fixed

@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # Operator-specific settings
     kubernetes_crd_group: str = "openwebui.com"
     kubernetes_crd_version: str = "v1alpha1"
+    # How long to wait for the operator to report a Terminal as Running before
+    # giving up and re-creating the CR from scratch.
+    terminal_ready_timeout: int = 120
 
     # Idle reaper — tear down terminals after N minutes of inactivity (0 = disabled)
     idle_timeout_minutes: int = 0

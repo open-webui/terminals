@@ -41,6 +41,24 @@ GROUP = "openwebui.com"
 VERSION = "v1alpha1"
 PLURAL = "terminals"
 
+
+def _reconcile_interval() -> float:
+    """Seconds between reconcile sweeps that re-create missing children."""
+    raw = os.environ.get("TERMINALS_RECONCILE_INTERVAL_SECONDS", "15")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning("Invalid TERMINALS_RECONCILE_INTERVAL_SECONDS=%r; using 15", raw)
+        return 15.0
+    return value if value > 0 else 15.0
+
+
+RECONCILE_INTERVAL = _reconcile_interval()
+
+# Pod phases that mean "this pod is still doing its job".  Anything else
+# (Succeeded, Failed, Unknown) is replaced by the reconciler.
+LIVE_POD_PHASES = ("Pending", "Running")
+
 RESTRICTED_POD_SECURITY_CONTEXT = {
     "runAsNonRoot": True,
     "seccompProfile": {"type": "RuntimeDefault"},
@@ -82,6 +100,7 @@ def configure(settings: kopf.OperatorSettings, **_):
     logging.getLogger().setLevel(log_level)
     settings.posting.level = max(log_level, logging.WARNING)
     settings.persistence.finalizer = "terminals.openwebui.com/finalizer"
+    _load_scheduling_config()
 
 
 # ---------------------------------------------------------------------------
@@ -310,12 +329,43 @@ def _set_condition(
     return conditions
 
 
+def _patch_terminal_status(namespace: str, terminal_name: str, status: dict) -> None:
+    """Merge-patch the Terminal's status subresource.
+
+    ``_content_type`` is explicit: the client otherwise picks the first
+    accepted type (``application/json-patch+json``), which rejects a dict body.
+    """
+    custom_api = k8s.CustomObjectsApi()
+    try:
+        custom_api.patch_namespaced_custom_object_status(
+            group=GROUP,
+            version=VERSION,
+            namespace=namespace,
+            plural=PLURAL,
+            name=terminal_name,
+            body={"status": status},
+            _content_type="application/merge-patch+json",
+        )
+    except k8s.exceptions.ApiException as e:
+        if e.status == 404:
+            return
+        log.warning(
+            "Failed to patch Terminal %s/%s status: %s", namespace, terminal_name, e
+        )
+
+
 def _parse_node_selector() -> dict[str, str] | None:
     raw = os.environ.get("TERMINALS_KUBERNETES_NODE_SELECTOR", "").strip()
     if not raw:
         return None
     if raw.startswith("{"):
-        data = json.loads(raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"TERMINALS_KUBERNETES_NODE_SELECTOR is not valid JSON ({e}); "
+                "expected a single JSON object"
+            ) from e
         if not isinstance(data, dict):
             raise ValueError("TERMINALS_KUBERNETES_NODE_SELECTOR must be an object")
         return {str(key): str(value) for key, value in data.items()}
@@ -335,10 +385,32 @@ def _parse_tolerations() -> list[dict] | None:
     raw = os.environ.get("TERMINALS_KUBERNETES_TOLERATIONS", "").strip()
     if not raw:
         return None
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"TERMINALS_KUBERNETES_TOLERATIONS is not valid JSON ({e}); "
+            "expected a single JSON array of toleration objects"
+        ) from e
     if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
         raise ValueError("TERMINALS_KUBERNETES_TOLERATIONS must be a JSON array")
     return data
+
+
+# Scheduling config comes from the operator's own environment, so it is
+# constant for the life of the process.  It is parsed once at startup rather
+# than on every pod build: a malformed value then stops the operator
+# immediately with a clear error, instead of being re-raised out of every
+# reconcile sweep forever while no pod is ever created.
+NODE_SELECTOR: dict[str, str] | None = None
+TOLERATIONS: list[dict] | None = None
+
+
+def _load_scheduling_config() -> None:
+    """Parse and cache the scheduling env vars.  Raises on malformed input."""
+    global NODE_SELECTOR, TOLERATIONS
+    NODE_SELECTOR = _parse_node_selector()
+    TOLERATIONS = _parse_tolerations()
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +502,10 @@ def _build_pod_manifest(
         "enableServiceLinks": False,
         "automountServiceAccountToken": False,
     }
-    node_selector = _parse_node_selector()
-    if node_selector:
-        pod_spec["nodeSelector"] = node_selector
-    tolerations = _parse_tolerations()
-    if tolerations:
-        pod_spec["tolerations"] = tolerations
+    if NODE_SELECTOR:
+        pod_spec["nodeSelector"] = NODE_SELECTOR
+    if TOLERATIONS:
+        pod_spec["tolerations"] = TOLERATIONS
     pod_security_context = _deep_merge(
         RESTRICTED_POD_SECURITY_CONTEXT if restricted else {},
         spec.get("podSecurityContext"),
@@ -529,6 +599,189 @@ def _build_pvc_manifest(
 
 
 # ---------------------------------------------------------------------------
+# Child resource reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _ensure_pvc(core_v1, name, namespace, spec, owner_ref, user_id) -> None:
+    pvc_name = _resource_name(name, "pvc")
+    manifest = _build_pvc_manifest(name, namespace, spec, owner_ref, user_id=user_id)
+    try:
+        core_v1.create_namespaced_persistent_volume_claim(
+            namespace=namespace, body=manifest
+        )
+        log.info("Created PVC %s/%s", namespace, pvc_name)
+    except k8s.exceptions.ApiException as e:
+        if e.status != 409:
+            raise
+
+
+def _ensure_secret(core_v1, name, namespace, owner_ref, user_id) -> str:
+    """Return the terminal API key, creating the Secret if it is missing.
+
+    The key is read back from an existing Secret so that a re-created Pod
+    keeps the credential the orchestrator already handed out.
+    """
+    secret_name = _resource_name(name, "apikey")
+    try:
+        existing = core_v1.read_namespaced_secret(secret_name, namespace)
+        raw = (existing.data or {}).get("api-key")
+        if raw:
+            return base64.b64decode(raw).decode()
+        # Secret exists but is empty — repopulate it rather than 409-looping.
+        api_key = _generate_api_key()
+        core_v1.patch_namespaced_secret(
+            secret_name,
+            namespace,
+            {"data": {"api-key": base64.b64encode(api_key.encode()).decode()}},
+        )
+        log.warning("Secret %s/%s had no api-key; regenerated", namespace, secret_name)
+        return api_key
+    except k8s.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+
+    api_key = _generate_api_key()
+    manifest = _build_secret_manifest(
+        name, namespace, api_key, owner_ref, user_id=user_id
+    )
+    try:
+        core_v1.create_namespaced_secret(namespace=namespace, body=manifest)
+        log.info("Created Secret %s/%s", namespace, secret_name)
+        return api_key
+    except k8s.exceptions.ApiException as e:
+        if e.status != 409:
+            raise
+    existing = core_v1.read_namespaced_secret(secret_name, namespace)
+    return base64.b64decode((existing.data or {})["api-key"]).decode()
+
+
+def _ensure_service(core_v1, name, namespace, owner_ref, user_id) -> None:
+    svc_name = _resource_name(name, "svc")
+    try:
+        core_v1.read_namespaced_service(svc_name, namespace)
+        return
+    except k8s.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+
+    manifest = _build_service_manifest(name, namespace, owner_ref, user_id=user_id)
+    try:
+        core_v1.create_namespaced_service(namespace=namespace, body=manifest)
+        log.info("Created Service %s/%s", namespace, svc_name)
+    except k8s.exceptions.ApiException as e:
+        if e.status != 409:
+            raise
+
+
+def _pod_state(core_v1, pod_name: str, namespace: str) -> str:
+    """Classify the terminal Pod as ``live``, ``terminating``, ``dead`` or ``gone``."""
+    try:
+        pod = core_v1.read_namespaced_pod(pod_name, namespace)
+    except k8s.exceptions.ApiException as e:
+        if e.status == 404:
+            return "gone"
+        raise
+
+    if (pod.metadata.deletion_timestamp if pod.metadata else None) is not None:
+        return "terminating"
+    phase = (pod.status.phase if pod.status else None) or "Unknown"
+    return "live" if phase in LIVE_POD_PHASES else "dead"
+
+
+def _live_phase(namespace: str, name: str) -> str | None:
+    """Read the Terminal's phase straight from the API server (no cache)."""
+    custom_api = k8s.CustomObjectsApi()
+    try:
+        cr = custom_api.get_namespaced_custom_object(
+            group=GROUP,
+            version=VERSION,
+            namespace=namespace,
+            plural=PLURAL,
+            name=name,
+        )
+    except k8s.exceptions.ApiException:
+        return None
+    return (cr.get("status") or {}).get("phase")
+
+
+def _ensure_children(
+    body: dict,
+    spec: dict,
+    name: str,
+    namespace: str,
+    phase_guard=None,
+) -> dict:
+    """Create any missing child resource for a Terminal CR.
+
+    Safe to call repeatedly — this is the single code path used by the create
+    handler, the reconcile timer, and the pod-deleted watcher.  Returns the
+    resolved child names plus ``pod_created`` so callers know whether the Pod
+    was just (re)created and the status needs to go back to ``Pending``.
+
+    *phase_guard* is an optional callable re-read just before the Pod would be
+    touched; if it reports ``Idle`` the repair is abandoned, so a reconcile
+    running against a stale cache can't undo an idle cull.
+    """
+    user_id = spec.get("userId", "")
+    owner_ref = _owner_ref(body)
+    core_v1 = k8s.CoreV1Api()
+
+    pod_name = _resource_name(name, "pod")
+    svc_name = _resource_name(name, "svc")
+    secret_name = _resource_name(name, "apikey")
+
+    _ensure_service(core_v1, name, namespace, owner_ref, user_id)
+
+    state = _pod_state(core_v1, pod_name, namespace)
+    pod_created = False
+
+    if state != "live" and phase_guard is not None and phase_guard() == "Idle":
+        log.debug("Terminal %s/%s went idle; skipping pod repair", namespace, name)
+        state = "idle"
+
+    if state == "dead":
+        # Succeeded/Failed pods never come back on their own — clear the way
+        # and let the next pass create a fresh one.
+        log.info("Pod %s/%s is not alive; deleting for replacement", namespace, pod_name)
+        try:
+            core_v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        except k8s.exceptions.ApiException as e:
+            if e.status != 404:
+                raise
+        state = "terminating"
+
+    if state == "gone":
+        persistence = spec.get("persistence", {})
+        pvc_name = None
+        if persistence.get("enabled", True):
+            pvc_name = _resource_name(name, "pvc")
+            _ensure_pvc(core_v1, name, namespace, spec, owner_ref, user_id)
+
+        api_key = _ensure_secret(core_v1, name, namespace, owner_ref, user_id)
+        manifest = _build_pod_manifest(
+            name, namespace, spec, api_key, owner_ref, pvc_name, user_id=user_id
+        )
+        try:
+            core_v1.create_namespaced_pod(namespace=namespace, body=manifest)
+            log.info("Created Pod %s/%s", namespace, pod_name)
+            pod_created = True
+        except k8s.exceptions.ApiException as e:
+            if e.status != 409:
+                raise
+            log.info("Pod %s/%s already exists", namespace, pod_name)
+
+    return {
+        "pod_name": pod_name,
+        "service_name": svc_name,
+        "secret_name": secret_name,
+        "service_url": f"http://{svc_name}.{namespace}.svc:8000",
+        "pod_created": pod_created,
+        "pod_state": state,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Create handler
 # ---------------------------------------------------------------------------
 
@@ -538,89 +791,95 @@ async def on_create(body, spec, name, namespace, patch, **_):
     """Create all child resources for a new Terminal CR."""
     log.info("Creating terminal %s/%s for user %s", namespace, name, spec.get("userId"))
 
-    user_id = spec.get("userId", "")
-    owner_ref = _owner_ref(body)
-    api_key = _generate_api_key()
-    core_v1 = k8s.CoreV1Api()
+    result = _ensure_children(body, spec, name, namespace)
 
-    # -- Status: Provisioning
-    patch.status["phase"] = "Provisioning"
+    patch.status["podName"] = result["pod_name"]
+    patch.status["serviceName"] = result["service_name"]
+    patch.status["serviceUrl"] = result["service_url"]
+    patch.status["apiKeySecret"] = result["secret_name"]
     patch.status["lastActivityAt"] = _now_iso()
-    patch.status["conditions"] = _set_condition(
-        {}, "Ready", "False", "Provisioning", "Creating child resources"
-    )
-
-    # -- PVC (if persistence enabled)
-    persistence = spec.get("persistence", {})
-    pvc_name = None
-    if persistence.get("enabled", True):
-        pvc_name = _resource_name(name, "pvc")
-        pvc_manifest = _build_pvc_manifest(name, namespace, spec, owner_ref, user_id=user_id)
-        try:
-            core_v1.create_namespaced_persistent_volume_claim(
-                namespace=namespace, body=pvc_manifest
-            )
-            log.info("Created PVC %s/%s", namespace, pvc_name)
-        except k8s.exceptions.ApiException as e:
-            if e.status == 409:
-                log.info("PVC %s/%s already exists", namespace, pvc_name)
-            else:
-                raise
-
-    # -- Secret (API key)
-    secret_name = _resource_name(name, "apikey")
-    secret_manifest = _build_secret_manifest(name, namespace, api_key, owner_ref, user_id=user_id)
-    try:
-        core_v1.create_namespaced_secret(namespace=namespace, body=secret_manifest)
-        log.info("Created Secret %s/%s", namespace, secret_name)
-    except k8s.exceptions.ApiException as e:
-        if e.status == 409:
-            log.info("Secret %s/%s already exists, reading existing key", namespace, secret_name)
-            existing = core_v1.read_namespaced_secret(secret_name, namespace)
-            api_key = base64.b64decode(existing.data["api-key"]).decode()
-        else:
-            raise
-
-    # -- Service
-    svc_name = _resource_name(name, "svc")
-    svc_manifest = _build_service_manifest(name, namespace, owner_ref, user_id=user_id)
-    try:
-        core_v1.create_namespaced_service(namespace=namespace, body=svc_manifest)
-        log.info("Created Service %s/%s", namespace, svc_name)
-    except k8s.exceptions.ApiException as e:
-        if e.status == 409:
-            log.info("Service %s/%s already exists", namespace, svc_name)
-        else:
-            raise
-
-    # -- Pod
-    pod_name = _resource_name(name, "pod")
-    pod_manifest = _build_pod_manifest(
-        name, namespace, spec, api_key, owner_ref, pvc_name, user_id=user_id
-    )
-    try:
-        core_v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
-        log.info("Created Pod %s/%s", namespace, pod_name)
-    except k8s.exceptions.ApiException as e:
-        if e.status == 409:
-            log.info("Pod %s/%s already exists", namespace, pod_name)
-        else:
-            raise
-
-    # -- Update status
-    service_url = f"http://{svc_name}.{namespace}.svc:8000"
-    patch.status["podName"] = pod_name
-    patch.status["serviceName"] = svc_name
-    patch.status["serviceUrl"] = service_url
-    patch.status["apiKeySecret"] = secret_name
     patch.status["phase"] = "Pending"
     patch.status["conditions"] = _set_condition(
-        {"conditions": patch.status.get("conditions", [])},
+        {},
         "Ready",
         "False",
         "PodNotReady",
         "Waiting for pod to become ready",
     )
+
+
+# ---------------------------------------------------------------------------
+# Reconcile — re-create children that disappeared out from under us
+# ---------------------------------------------------------------------------
+
+
+def _reconcile(body, spec, status, meta, name, namespace, trigger: str) -> None:
+    """Level-triggered repair of a Terminal's child resources.
+
+    ``on.create`` only fires once, so a Pod deleted afterwards (manual
+    ``kubectl delete``, eviction, node loss, operator downtime) used to stay
+    gone while the CR still advertised ``phase: Running`` — the orchestrator
+    then kept proxying to a Service with no endpoints.
+    """
+    if meta.get("deletionTimestamp"):
+        return
+
+    phase = (status or {}).get("phase")
+    if phase == "Idle":
+        # Idle culling deletes the pod on purpose; ``idle_check`` owns that
+        # state and the orchestrator re-creates the CR on next access.
+        return
+
+    result = _ensure_children(
+        body,
+        spec,
+        name,
+        namespace,
+        phase_guard=lambda: _live_phase(namespace, name),
+    )
+    if result["pod_state"] == "idle":
+        return
+
+    current = status or {}
+    updates: dict = {}
+    for field, value in (
+        ("podName", result["pod_name"]),
+        ("serviceName", result["service_name"]),
+        ("serviceUrl", result["service_url"]),
+        ("apiKeySecret", result["secret_name"]),
+    ):
+        if current.get(field) != value:
+            updates[field] = value
+
+    if result["pod_created"]:
+        log.info(
+            "Re-created missing pod for terminal %s/%s (%s)", namespace, name, trigger
+        )
+        updates["phase"] = "Pending"
+        updates["conditions"] = _set_condition(
+            current, "Ready", "False", "PodRecreated", "Re-creating missing pod"
+        )
+    elif result["pod_state"] != "live" and phase == "Running":
+        # Pod is on its way out — stop advertising the terminal as usable.
+        updates["phase"] = "Pending"
+        updates["conditions"] = _set_condition(
+            current, "Ready", "False", "PodNotReady", "Pod is terminating"
+        )
+
+    if updates:
+        _patch_terminal_status(namespace, name, updates)
+
+
+@kopf.timer(GROUP, VERSION, PLURAL, interval=RECONCILE_INTERVAL)
+def reconcile_timer(body, spec, status, meta, name, namespace, **_):
+    """Periodically ensure every non-idle Terminal still has its children."""
+    _reconcile(body, spec, status, meta, name, namespace, "timer")
+
+
+@kopf.on.resume(GROUP, VERSION, PLURAL)
+def on_resume(body, spec, status, meta, name, namespace, **_):
+    """Re-adopt existing Terminals when the operator restarts."""
+    _reconcile(body, spec, status, meta, name, namespace, "resume")
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +900,37 @@ async def on_delete(name, namespace, **_):
 # ---------------------------------------------------------------------------
 # Pod watcher — update Terminal status when pod phase changes
 # ---------------------------------------------------------------------------
+
+
+def _on_pod_lost(terminal: dict, namespace: str, terminal_name: str) -> None:
+    """A terminal Pod vanished — flip the CR out of Running and re-create it.
+
+    Status is patched *before* the pod is re-created so the orchestrator stops
+    routing to the dead endpoint immediately instead of waiting for a proxy
+    connection error to time out.
+    """
+    current_status = terminal.get("status") or {}
+    log.info("Pod for terminal %s/%s was deleted; re-creating", namespace, terminal_name)
+    _patch_terminal_status(
+        namespace,
+        terminal_name,
+        {
+            "phase": "Pending",
+            "conditions": _set_condition(
+                current_status, "Ready", "False", "PodDeleted", "Pod was deleted"
+            ),
+        },
+    )
+    try:
+        _ensure_children(
+            terminal, terminal.get("spec") or {}, terminal_name, namespace
+        )
+    except k8s.exceptions.ApiException as e:
+        # The reconcile timer retries; don't let a transient API error kill
+        # the pod watcher.
+        log.warning(
+            "Could not re-create pod for terminal %s/%s: %s", namespace, terminal_name, e
+        )
 
 
 @kopf.on.event("v1", "pods", labels={"app.kubernetes.io/managed-by": "terminals"})
@@ -679,11 +969,23 @@ async def on_pod_event(event, body, **_):
     # Don't update if terminal is being torn down
     if current_phase in ("Idle",):
         return
+    if terminal.get("metadata", {}).get("deletionTimestamp"):
+        return
+
+    if event.get("type") == "DELETED":
+        _on_pod_lost(terminal, namespace, terminal_name)
+        return
+
+    # A pod with a deletionTimestamp still reports Running/ready for its whole
+    # grace period — don't keep advertising it as usable.
+    terminating = pod.get("metadata", {}).get("deletionTimestamp") is not None
+    if terminating:
+        is_ready = False
 
     new_phase = current_phase
     if is_ready and pod_phase == "Running":
         new_phase = "Running"
-    elif pod_phase in ("Pending",):
+    elif terminating or pod_phase in ("Pending",):
         new_phase = "Pending"
     elif pod_phase in ("Failed", "Unknown"):
         new_phase = "Error"
@@ -696,32 +998,14 @@ async def on_pod_event(event, body, **_):
         "Ready",
         "True" if is_ready else "False",
         "PodReady" if is_ready else "PodNotReady",
-        f"Pod phase: {pod_phase}",
+        "Pod is terminating" if terminating else f"Pod phase: {pod_phase}",
     )
 
-    status_patch = {
-        "status": {
-            "phase": new_phase,
-            "conditions": conditions,
-        }
-    }
-
+    status_patch = {"phase": new_phase, "conditions": conditions}
     if is_ready and new_phase == "Running":
-        status_patch["status"]["lastActivityAt"] = _now_iso()
+        status_patch["lastActivityAt"] = _now_iso()
 
-    try:
-        custom_api.patch_namespaced_custom_object_status(
-            group=GROUP,
-            version=VERSION,
-            namespace=namespace,
-            plural=PLURAL,
-            name=terminal_name,
-            body=status_patch,
-        )
-    except k8s.exceptions.ApiException as e:
-        if e.status == 404:
-            return
-        log.warning("Failed to patch Terminal %s/%s status: %s", namespace, terminal_name, e)
+    _patch_terminal_status(namespace, terminal_name, status_patch)
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +1047,23 @@ async def idle_check(spec, status, name, namespace, **_):
     if not pod_name:
         return
 
+    # Mark Idle *before* deleting so the pod watcher and the reconcile timer
+    # see the intent and don't treat the deletion as a pod loss to repair.
+    _patch_terminal_status(
+        namespace,
+        name,
+        {
+            "phase": "Idle",
+            "conditions": _set_condition(
+                status,
+                "Ready",
+                "False",
+                "IdleTimeout",
+                f"Pod deleted after {elapsed:.0f} min of inactivity",
+            ),
+        },
+    )
+
     # Delete the pod to free resources; the PVC, Secret, and CRD remain
     core_v1 = k8s.CoreV1Api()
     try:
@@ -772,28 +1073,3 @@ async def idle_check(spec, status, name, namespace, **_):
             log.info("Pod %s/%s already gone", namespace, pod_name)
         else:
             raise
-
-    # Update status to Idle
-    custom_api = k8s.CustomObjectsApi()
-    try:
-        custom_api.patch_namespaced_custom_object_status(
-            group=GROUP,
-            version=VERSION,
-            namespace=namespace,
-            plural=PLURAL,
-            name=name,
-            body={
-                "status": {
-                    "phase": "Idle",
-                    "conditions": _set_condition(
-                        status,
-                        "Ready",
-                        "False",
-                        "IdleTimeout",
-                        f"Pod deleted after {elapsed:.0f} min of inactivity",
-                    ),
-                }
-            },
-        )
-    except k8s.exceptions.ApiException:
-        pass

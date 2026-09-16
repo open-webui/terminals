@@ -39,6 +39,8 @@ kubectl apply -f manifests/operator-deployment.yaml
 
 Set `TERMINALS_BACKEND=kubernetes-operator` when deploying the Terminals service.
 
+The operator reconciles continuously: if a terminal pod is deleted, evicted, or lost with its node, the pod is re-created and the `Terminal` drops out of `Running` so the orchestrator stops proxying to the dead endpoint. Pods removed by the idle timeout are left down on purpose.
+
 For OpenShift, use restricted mode and an OpenShift-compatible Open Terminal image. See [OpenShift deployment](docs/openshift.md).
 
 ### From source (development)
@@ -226,6 +228,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:///.../data/terminals.db` | SQLAlchemy database URL. SQLite is the default; PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
 | `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. |
+| `TERMINALS_TERMINAL_READY_TIMEOUT` | `120` | Seconds the `kubernetes-operator` backend waits for a Terminal CR to report `Running` — during first provisioning or while the operator re-creates a lost pod — before deleting and re-creating the CR |
 | `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only). A revoked token stays usable for up to the TTL; `0` validates every request. |
 | `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links. |
 | `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default because per-request logging is expensive at high request rates. |
@@ -267,6 +270,14 @@ All settings are configured through environment variables prefixed with `TERMINA
 |----------|---------|-------------|
 | `TERMINALS_KUBERNETES_CRD_GROUP` | `openwebui.com` | Terminal CRD API group |
 | `TERMINALS_KUBERNETES_CRD_VERSION` | `v1alpha1` | Terminal CRD API version |
+
+The operator pod itself reads these:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TERMINALS_RECONCILE_INTERVAL_SECONDS` | `15` | How often each non-idle `Terminal` is checked for missing child resources |
+| `TERMINALS_LOG_LEVEL` | `INFO` | Operator log level |
+| `TERMINALS_KUBERNETES_NODE_SELECTOR` / `_TOLERATIONS` / `_AFFINITY` | | Scheduling applied to terminal pods |
 
 These tables are the public environment-variable surface. Compatibility-only
 settings may still be accepted by the code but are intentionally omitted.
