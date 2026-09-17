@@ -16,16 +16,17 @@ Open WebUI  →  Terminals service  →  per-user containers
 
 The fastest way to get running is with Docker. Terminals will manage sibling containers through the Docker socket.
 
-### Docker (recommended for single-node)
+### Docker Desktop (recommended for single-node)
 
 ```bash
 docker run -p 3000:3000 \
+  -e TERMINALS_DOCKER_HOST=host.docker.internal \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v $(pwd)/data:/app/data \
-  terminals
+  ghcr.io/open-webui/terminals:latest
 ```
 
-**Prerequisites:** Docker running on the host.
+**Prerequisites:** Docker running on the host. 
 
 ### Kubernetes Operator (recommended for clusters)
 
