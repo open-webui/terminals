@@ -20,9 +20,10 @@ The fastest way to get running is with Docker. Terminals will manage sibling con
 
 ```bash
 docker run -p 3000:3000 \
+  -e TERMINALS_DOCKER_HOST=host.docker.internal \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v $(pwd)/data:/app/data \
-  terminals
+  ghcr.io/open-webui/terminals:latest
 ```
 
 **Prerequisites:** Docker running on the host.
