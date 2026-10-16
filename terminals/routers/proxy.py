@@ -658,7 +658,8 @@ async def _ws_proxy(
 
     try:
         async with upstream:
-            await upstream.send(json.dumps({"type": "auth", "token": instance.api_key}))
+            chat_id = ws.headers.get("x-session-id", "")
+            await upstream.send(json.dumps({"type": "auth", "token": instance.api_key, "chat_id": chat_id}))
 
             async def _client_to_upstream():
                 try:
