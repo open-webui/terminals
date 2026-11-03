@@ -129,6 +129,16 @@ async def verify_admin_api_key(
     return None
 
 
+async def verify_spec_access(
+    authorization: Optional[str] = Header(None),
+) -> Optional[str]:
+    """Spec discovery runs without a user, so the admin API key is accepted next to user tokens."""
+    try:
+        return await verify_admin_api_key(authorization)
+    except HTTPException:
+        return await verify_api_key(authorization)
+
+
 async def verify_user_id(
     verified_id: Optional[str] = Depends(verify_api_key),
     x_user_id: str = Header(..., alias="X-User-Id"),
