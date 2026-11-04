@@ -217,7 +217,7 @@ class KubernetesOperatorBackend(Backend):
 
         # Idle timeout
         idle_timeout = s.get("idle_timeout_minutes", settings.idle_timeout_minutes)
-        if idle_timeout and idle_timeout > 0:
+        if idle_timeout is not None and idle_timeout >= 0:
             cr_spec["idleTimeoutMinutes"] = idle_timeout
 
         policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]

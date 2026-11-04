@@ -741,6 +741,8 @@ async def idle_check(spec, status, name, namespace, **_):
         return
 
     timeout_minutes = spec.get("idleTimeoutMinutes", 30)
+    if timeout_minutes <= 0:
+        return
     try:
         last_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
     except (ValueError, TypeError):

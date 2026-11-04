@@ -75,9 +75,9 @@ spec:
                 idleTimeoutMinutes:
                   type: integer
                   default: 30
-                  minimum: 1
+                  minimum: 0
                   description: >-
-                    Minutes of inactivity before the terminal pod is stopped.
+                    Minutes of inactivity before the terminal pod is stopped. 0 disables idle cleanup.
                 restricted:
                   type: boolean
                   default: false
