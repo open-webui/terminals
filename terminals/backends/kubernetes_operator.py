@@ -19,7 +19,7 @@ from typing import Optional
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
-from terminals.backends.base import Backend, RefreshResult
+from terminals.backends.base import Backend, ProvisioningError, RefreshResult
 from terminals.config import settings
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
@@ -411,6 +411,8 @@ class KubernetesOperatorBackend(Backend):
                     name=name,
                 )
                 status = cr.get("status", {})
+                if status.get("phase") == "Error":
+                    raise ProvisioningError(status.get("message") or "Terminal provisioning failed")
                 if (
                     status.get("phase") == "Running"
                     and status.get("serviceUrl")

@@ -178,8 +178,7 @@ class DockerBackend(Backend):
         container = None
         for attempt in range(max_conflict_retries + 1):
             try:
-                container = await docker.containers.create(config, name=instance_name)
-                await container.start()
+                container = await docker.containers.run(config, name=instance_name)
                 break
             except aiodocker.exceptions.DockerError as exc:
                 if exc.status == 409 and attempt < max_conflict_retries:

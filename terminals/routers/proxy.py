@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from starlette.background import BackgroundTask
 
+from terminals.backends.base import ProvisioningError
 from terminals.config import settings
 from terminals.utils.context import (
     CONTEXT_HEADER,
@@ -133,9 +134,12 @@ async def _resolve_instance(
 ) -> InstanceInfo:
     """Return a running instance, auto-provisioning if needed."""
     backend = request.app.state.backend
-    info = await backend.ensure_terminal(
-        user_id, policy_id=policy_id, context_id=context_id, spec=spec
-    )
+    try:
+        info = await backend.ensure_terminal(
+            user_id, policy_id=policy_id, context_id=context_id, spec=spec
+        )
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if info is None:
         raise RuntimeError(f"Failed to provision terminal for user {user_id}")
     try:
@@ -227,6 +231,8 @@ async def _proxy_request(
                         context_id=context_id,
                         spec=spec,
                     )
+                except HTTPException:
+                    raise
                 except Exception as resolve_err:
                     logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
                     return Response(
@@ -276,6 +282,8 @@ async def _proxy_request(
                         context_id=context_id,
                         spec=spec,
                     )
+                except HTTPException:
+                    raise
                 except Exception as resolve_err:
                     logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
                     return Response(

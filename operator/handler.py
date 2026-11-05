@@ -533,6 +533,23 @@ def _build_pvc_manifest(
 # ---------------------------------------------------------------------------
 
 
+def _raise_provisioning_error(error, patch):
+    if error.status != 403:
+        raise error
+    message = (
+        "Terminal capacity exhausted, please retry later"
+        if "exceeded quota" in (error.body or "").lower()
+        else "Terminal provisioning forbidden by Kubernetes"
+    )
+    log.error("Terminal resource creation rejected: %s", error)
+    patch.status["phase"] = "Error"
+    patch.status["message"] = message
+    patch.status["conditions"] = _set_condition(
+        {}, "Ready", "False", "ProvisioningFailed", message
+    )
+    raise kopf.PermanentError(message) from error
+
+
 @kopf.on.create(GROUP, VERSION, PLURAL)
 async def on_create(body, spec, name, namespace, patch, **_):
     """Create all child resources for a new Terminal CR."""
@@ -565,7 +582,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
             if e.status == 409:
                 log.info("PVC %s/%s already exists", namespace, pvc_name)
             else:
-                raise
+                _raise_provisioning_error(e, patch)
 
     # -- Secret (API key)
     secret_name = _resource_name(name, "apikey")
@@ -579,7 +596,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
             existing = core_v1.read_namespaced_secret(secret_name, namespace)
             api_key = base64.b64decode(existing.data["api-key"]).decode()
         else:
-            raise
+            _raise_provisioning_error(e, patch)
 
     # -- Service
     svc_name = _resource_name(name, "svc")
@@ -591,7 +608,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
         if e.status == 409:
             log.info("Service %s/%s already exists", namespace, svc_name)
         else:
-            raise
+            _raise_provisioning_error(e, patch)
 
     # -- Pod
     pod_name = _resource_name(name, "pod")
@@ -605,7 +622,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
         if e.status == 409:
             log.info("Pod %s/%s already exists", namespace, pod_name)
         else:
-            raise
+            _raise_provisioning_error(e, patch)
 
     # -- Update status
     service_url = f"http://{svc_name}.{namespace}.svc:8000"

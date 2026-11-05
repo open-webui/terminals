@@ -21,6 +21,10 @@ from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
 log = logging.getLogger(__name__)
 
 
+class ProvisioningError(RuntimeError):
+    """Terminal provisioning failed with a reason suitable for the client."""
+
+
 @dataclass
 class RefreshResult:
     matched: int = 0
