@@ -247,6 +247,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Keep above Open Terminal's maximum `/execute?wait` value. |
 | `TERMINALS_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream |
 | `TERMINALS_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool |
+| `TERMINALS_PROVISION_TIMEOUT_SECONDS` | `120` | Timeout waiting for terminal readiness on the `kubernetes-operator` backend |
 
 ### Docker-only settings
 
