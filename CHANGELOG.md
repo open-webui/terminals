@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-11-05
+
+### Added
+
+- Added a **User data** list to the admin UI showing users with saved terminal files, including users whose terminals have already stopped.
+- Added **Delete user data** to remove a user's saved terminal files across policies, chats, and automation runs. After confirmation, it stops their terminals and refuses to delete files if terminal resources remain. Cleanup is also available through the admin API. Deleting an Open WebUI account does not trigger it automatically; shared Kubernetes storage still requires separate cleanup.
+
+### Changed
+
+- Made the admin UI more compact with shorter table rows, less vertical space between sections and form fields, softer borders, and smaller gray delete actions.
+- Rewrote the README around three setup steps: start Terminals, open the admin UI, and connect Open WebUI. The Docker commands now generate an API key and connect services through one network. Added troubleshooting and clearer instructions for saved files, deletion, and Kubernetes setup.
+
+### Fixed
+
+- Fixed both Kubernetes deployment modes ignoring custom terminal health-check settings. Policies can now give slow terminals more time to respond before they are marked unavailable or restarted. Existing terminals must be refreshed to use the updated settings.
+
 ## [0.2.8] - 2026-11-05
 
 ### Added
