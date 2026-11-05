@@ -32,6 +32,7 @@ from terminals.utils.context import (
 from terminals.utils.env import build_terminal_env
 from terminals.utils.kubernetes_security import (
     container_security_context,
+    deep_merge,
     pod_security_context,
     restricted_enabled,
 )
@@ -489,6 +490,7 @@ class KubernetesOperatorBackend(Backend):
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         ns = settings.kubernetes_namespace
+        s = spec or {}
         context_id = normalize_context_id(context_id)
         terminal_name = _sanitize_name(user_id, policy_id, context_id)
         reset_name = f"{terminal_name[:57]}-reset"
@@ -514,14 +516,30 @@ class KubernetesOperatorBackend(Backend):
             CONTEXT_HASH_LABEL: context_hash(context_id),
             "openwebui.com/reset": "true",
         }
+        template = (s.get("pod_template") or s.get("podTemplate") or {}).get("spec") or {}
+        terminal_container = next(
+            (item for item in template.get("containers", []) if item.get("name") == "open-terminal"),
+            {},
+        )
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
             spec=client.V1PodSpec(
                 restart_policy="Never",
+                automount_service_account_token=False,
+                security_context=deep_merge(
+                    template.get("securityContext"), pod_security_context(s)
+                ) or None,
                 containers=[
                     client.V1Container(
                         name="reset",
-                        image="busybox:1.36",
+                        image=s.get("image", settings.effective_kubernetes_image),
+                        security_context=deep_merge(
+                            terminal_container.get("securityContext"), container_security_context(s)
+                        ) or None,
+                        resources=client.V1ResourceRequirements(
+                            requests={"cpu": "10m", "memory": "16Mi"},
+                            limits={"cpu": "100m", "memory": "64Mi"},
+                        ),
                         command=[
                             "sh",
                             "-c",
@@ -540,8 +558,16 @@ class KubernetesOperatorBackend(Backend):
                         ),
                     )
                 ],
-                node_selector=node_selector(),
-                tolerations=tolerations(),
+                node_selector=deep_merge(template.get("nodeSelector"), node_selector()) or None,
+                tolerations=tolerations() or template.get("tolerations"),
+                runtime_class_name=template.get("runtimeClassName"),
+                priority_class_name=template.get("priorityClassName"),
+                affinity=template.get("affinity"),
+                node_name=template.get("nodeName"),
+                scheduler_name=template.get("schedulerName"),
+                topology_spread_constraints=template.get("topologySpreadConstraints"),
+                image_pull_secrets=template.get("imagePullSecrets"),
+                service_account_name=template.get("serviceAccountName"),
             ),
         )
 
