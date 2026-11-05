@@ -658,6 +658,9 @@ async def on_pod_event(event, body, **_):
     # Check container readiness
     container_statuses = (pod.get("status") or {}).get("containerStatuses", [])
     is_ready = any(cs.get("ready", False) for cs in container_statuses)
+    if event.get("type") == "DELETED":
+        pod_phase = "Deleted"
+        is_ready = False
 
     custom_api = k8s.CustomObjectsApi()
     try:
@@ -676,8 +679,15 @@ async def on_pod_event(event, body, **_):
     current_status = terminal.get("status", {})
     current_phase = current_status.get("phase")
 
+    # Ignore delayed events from a previous CR with the same name.
+    if any(
+        owner.get("kind") == "Terminal" and owner.get("uid") != terminal["metadata"]["uid"]
+        for owner in pod["metadata"].get("ownerReferences", [])
+    ):
+        return
+
     # Don't update if terminal is being torn down
-    if current_phase in ("Idle",):
+    if current_phase in ("Idle",) or terminal.get("metadata", {}).get("deletionTimestamp"):
         return
 
     new_phase = current_phase
@@ -685,7 +695,7 @@ async def on_pod_event(event, body, **_):
         new_phase = "Running"
     elif pod_phase in ("Pending",):
         new_phase = "Pending"
-    elif pod_phase in ("Failed", "Unknown"):
+    elif pod_phase in ("Failed", "Unknown", "Deleted"):
         new_phase = "Error"
 
     if new_phase == current_phase and current_phase == "Running" and is_ready:
