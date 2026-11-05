@@ -11,8 +11,11 @@ class PolicyNotFoundError(Exception):
 def merge_policy_defaults(policy_data: dict) -> dict:
     """Merge env var defaults with policy overrides."""
     defaults = {}
-    if settings.image:
-        defaults["image"] = settings.image
+    image = settings.image
+    if settings.backend in ("kubernetes", "kubernetes-operator"):
+        image = settings.effective_kubernetes_image
+    if image:
+        defaults["image"] = image
     return {**defaults, **{k: v for k, v in policy_data.items() if v is not None}}
 
 
