@@ -21,12 +21,24 @@ The fastest way to get running is with Docker. Terminals will manage sibling con
 ```bash
 docker run -p 3000:3000 \
   -e TERMINALS_DOCKER_HOST=host.docker.internal \
+  -e TERMINALS_DOCKER_HOST_DATA_DIR="$(pwd)/data/terminals" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd)/data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   ghcr.io/open-webui/terminals:latest
 ```
 
 **Prerequisites:** Docker running on the host.
+
+The image stores SQLite at `/app/data/terminals.db` and accesses workspaces at
+`/app/data/terminals`. Set the optional `TERMINALS_DOCKER_HOST_DATA_DIR` only when
+the Docker daemon sees those workspaces at a different absolute path, as above.
+Both paths must refer to the same bind-mounted directory so provisioning and
+file resets access the same files. Leave it unset when running directly on the
+Docker host or when host and container paths match.
+
+When upgrading an existing deployment, back up and move its database and
+workspaces from their previous effective paths before switching to this layout.
+Changing these settings does not migrate existing files or container mounts.
 
 ### Kubernetes Operator (recommended for clusters)
 
@@ -243,7 +255,8 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_DOCKER_HOST` | `127.0.0.1` | Host/IP that the orchestrator uses to reach published terminal container ports |
 | `TERMINALS_DOCKER_NETWORK` | | Docker network for terminal containers. Use a comma-separated list to shard terminals across multiple Docker bridge networks. |
 | `TERMINALS_DOCKER_MOUNTS` | | JSON array of extra bind mounts with `source`, `target`, and optional `readOnly` |
-| `TERMINALS_DOCKER_DATA_DIR` | `data/terminals` | Host directory for per-user `/home/user` bind mounts |
+| `TERMINALS_DOCKER_DATA_DIR` | `data/terminals` (`/app/data/terminals` in the image) | Workspace directory accessible to the orchestrator, including file resets |
+| `TERMINALS_DOCKER_HOST_DATA_DIR` | | Optional absolute Docker-host path to the same workspace directory. Unset uses `TERMINALS_DOCKER_DATA_DIR`. |
 
 ### Kubernetes-only settings
 

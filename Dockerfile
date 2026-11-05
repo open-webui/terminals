@@ -13,6 +13,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV TERMINALS_DATABASE_URL=sqlite+aiosqlite:////app/data/terminals.db
+ENV TERMINALS_DOCKER_DATA_DIR=/app/data/terminals
 
 WORKDIR /app
 
