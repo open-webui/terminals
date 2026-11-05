@@ -76,7 +76,7 @@ If Open WebUI runs directly on the same host, use `http://localhost:3000` instea
 
 Verify the connection and save it. In a chat, select it from the terminal menu. Terminals creates the user's container on first use; the first request can take longer while its image is downloaded.
 
-See the [Open WebUI connection guide](https://docs.openwebui.com/features/open-terminal/setup/connecting/) for the full UI walkthrough. Leave `TERMINALS_OPEN_WEBUI_URL` unset for this Bearer-key setup.
+See the [Open WebUI connection guide](https://docs.openwebui.com/features/open-terminal/setup/connecting/) for the full UI walkthrough.
 
 <details>
 <summary>Try a terminal directly with curl</summary>
