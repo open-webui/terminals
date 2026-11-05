@@ -133,7 +133,7 @@ class KubernetesOperatorBackend(Backend):
         name = _sanitize_name(user_id, policy_id, context_id)
         ns = settings.kubernetes_namespace
         try:
-            return await custom.get_namespaced_custom_object(
+            cr = await custom.get_namespaced_custom_object(
                 group=self._group,
                 version=self._version,
                 namespace=ns,
@@ -144,6 +144,17 @@ class KubernetesOperatorBackend(Backend):
             if e.status == 404:
                 return None
             raise
+
+        status = cr.get("status") or {}
+        if status.get("phase") == "Running" and status.get("podName"):
+            try:
+                await client.CoreV1Api(api_client).read_namespaced_pod(status["podName"], ns)
+            except client.exceptions.ApiException as e:
+                if e.status != 404:
+                    raise
+                # A missed deletion event must still use the existing recovery path.
+                status["phase"] = "Error"
+        return cr
 
     async def _create_terminal_cr(
         self,

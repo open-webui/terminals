@@ -23,6 +23,7 @@ from websockets.exceptions import InvalidHandshake
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
+from starlette.background import BackgroundTask
 
 from terminals.config import settings
 from terminals.utils.context import (
@@ -304,7 +305,7 @@ async def _proxy_request(
         content=upstream_resp.aiter_bytes(),
         status_code=upstream_resp.status_code,
         headers=response_headers,
-        background=BackgroundTasks([upstream_resp.aclose]),
+        background=BackgroundTask(upstream_resp.aclose),
     )
 
 
