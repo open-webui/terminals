@@ -36,6 +36,14 @@ class Settings(BaseSettings):
         default=f"{_DEFAULT_DATA_DIR}/terminals",
         validation_alias=AliasChoices("TERMINALS_DOCKER_DATA_DIR", "TERMINALS_DATA_DIR"),
     )
+    docker_host_data_dir: str = ""  # optional Docker-host path for docker_data_dir
+
+    @field_validator("docker_host_data_dir")
+    @classmethod
+    def _validate_docker_host_data_dir(cls, value: str) -> str:
+        if value and not Path(value).is_absolute():
+            raise ValueError("TERMINALS_DOCKER_HOST_DATA_DIR must be absolute")
+        return value
 
     port: int = 3000
     host: str = "0.0.0.0"

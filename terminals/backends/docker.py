@@ -86,6 +86,9 @@ class DockerBackend(Backend):
         context_id = normalize_context_id(context_id)
         instance_name = self._container_name(policy_id, user_id, context_id)
         host_data_dir = str(self._home_dir(user_id, context_id).resolve())
+        if settings.docker_host_data_dir:
+            relative_home = self._home_dir(user_id, context_id).relative_to(settings.docker_data_dir)
+            host_data_dir = str(Path(settings.docker_host_data_dir) / relative_home)
         s = spec or {}
 
         image = s.get("image", settings.image)
