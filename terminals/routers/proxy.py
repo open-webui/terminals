@@ -33,7 +33,7 @@ from terminals.utils.context import (
     normalize_context_id,
 )
 from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
-from terminals.routers.auth import validate_token, verify_api_key, verify_user_id
+from terminals.routers.auth import validate_token, verify_api_key, verify_spec_access, verify_user_id
 
 router = APIRouter()
 
@@ -406,7 +406,7 @@ async def _get_cached_spec(
 
 @router.get(
     "/openapi.json",
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_spec_access)],
 )
 async def get_openapi_spec(request: Request):
     """Return the open-terminal OpenAPI spec.
@@ -457,7 +457,7 @@ async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
 
 @router.get(
     "/p/{policy_id}/openapi.json",
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_spec_access)],
 )
 async def policy_openapi_spec(
     policy_id: str,

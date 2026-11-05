@@ -287,6 +287,8 @@ The quick start uses a static `TERMINALS_API_KEY` for both the admin UI and Open
 
 For Open WebUI session authentication, set `TERMINALS_OPEN_WEBUI_URL` and use **Session** auth on the Open WebUI terminal connection. Terminals validates user tokens against that instance. Admin policy and lifecycle APIs still require a separate Terminals admin API key; user JWTs are not enough.
 
+Tool discovery at `/openapi.json` and `/p/{policy_id}/openapi.json` also accepts the Terminals admin API key in Session mode. Terminal operations still require a valid user token.
+
 `terminals serve` generates and prints a key if none is configured. That generated key changes when the service process restarts. Running the ASGI app directly without either authentication setting allows unauthenticated access and is intended only for local development.
 
 ## Configuration
