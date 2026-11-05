@@ -13,6 +13,7 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend
 from terminals.config import settings
+from terminals.utils.network_profiles import resolve_network_profile
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
     CONTEXT_ID_ANNOTATION,
@@ -253,6 +254,7 @@ class KubernetesBackend(Backend):
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
+        profile = resolve_network_profile(spec, "kubernetes")
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         s = spec or {}
@@ -263,6 +265,7 @@ class KubernetesBackend(Backend):
         policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
         ns = settings.kubernetes_namespace
         labels = _base_labels(user_id)
+        labels.update(profile.get("kubernetes_labels", {}))
         labels["openwebui.com/policy"] = policy_slug
         labels[CONTEXT_TYPE_LABEL] = (
             DEFAULT_CONTEXT_ID
@@ -633,6 +636,7 @@ class KubernetesBackend(Backend):
         )
         labels[CONTEXT_HASH_LABEL] = context_hash(context_id)
         labels["openwebui.com/reset"] = "true"
+        labels.update(resolve_network_profile(s, "kubernetes").get("kubernetes_labels", {}))
 
         volume_mount = client.V1VolumeMount(
             name="home",

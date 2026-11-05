@@ -225,7 +225,7 @@
 		const data = new FormData(form);
 		const id = String(data.get('id') || '').trim();
 		const body: Record<string, any> = {};
-		for (const key of ['image', 'cpu_limit', 'memory_limit', 'storage', 'storage_mode']) {
+		for (const key of ['image', 'cpu_limit', 'memory_limit', 'storage', 'storage_mode', 'network_profile']) {
 			const value = String(data.get(key) || '').trim();
 			if (value) body[key] = value;
 		}
@@ -507,6 +507,7 @@
 					<label class="block text-xs text-gray-600 dark:text-gray-400">ID<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Image<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">CPU<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Network profile<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="network_profile" value={editingPolicy.data.network_profile || ''} placeholder="Deployment default" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Memory<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="memory_limit" value={editingPolicy.data.memory_limit || ''} placeholder="1Gi" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="storage" value={editingPolicy.data.storage || ''} placeholder="5Gi" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage mode<select class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="storage_mode" value={editingPolicy.data.storage_mode || ''}>

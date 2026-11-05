@@ -22,6 +22,7 @@ from kubernetes_asyncio.client import ApiClient
 from terminals.backends.base import Backend, ProvisioningError, RefreshResult
 from terminals.backends.kubernetes import _cleanup_user_pvcs, _list_user_data
 from terminals.config import settings
+from terminals.utils.network_profiles import resolve_network_profile
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
     CONTEXT_ID_ANNOTATION,
@@ -165,6 +166,7 @@ class KubernetesOperatorBackend(Backend):
         spec: dict | None = None,
     ) -> dict:
         """Create a Terminal CR for a user+policy and return it."""
+        profile = resolve_network_profile(spec, "kubernetes-operator")
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
         context_id = normalize_context_id(context_id)
@@ -225,6 +227,10 @@ class KubernetesOperatorBackend(Backend):
         if env:
             cr_spec["env"] = env
         pod_template = s.get("pod_template") or s.get("podTemplate")
+        if profile:
+            pod_template = deep_merge(pod_template, {
+                "metadata": {"labels": profile["kubernetes_labels"]},
+            })
         if pod_template:
             cr_spec["podTemplate"] = pod_template
 
@@ -556,7 +562,10 @@ class KubernetesOperatorBackend(Backend):
             CONTEXT_HASH_LABEL: context_hash(context_id),
             "openwebui.com/reset": "true",
         }
-        template = (s.get("pod_template") or s.get("podTemplate") or {}).get("spec") or {}
+        pod_template = s.get("pod_template") or s.get("podTemplate") or {}
+        labels = {**(pod_template.get("metadata", {}).get("labels") or {}), **labels}
+        labels.update(resolve_network_profile(s, "kubernetes-operator").get("kubernetes_labels", {}))
+        template = pod_template.get("spec") or {}
         terminal_container = next(
             (item for item in template.get("containers", []) if item.get("name") == "open-terminal"),
             {},
