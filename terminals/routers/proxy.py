@@ -15,6 +15,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -514,7 +515,7 @@ async def proxy(
 
 
 # ---------------------------------------------------------------------------
-# WebSocket proxy for interactive terminal sessions
+# WebSocket proxy
 # ---------------------------------------------------------------------------
 
 
@@ -571,7 +572,7 @@ async def _validate_ws_auth(
 
 async def _ws_proxy_handler(
     ws: WebSocket,
-    session_id: str,
+    path: str,
     user_id: str,
     policy_id: str = "default",
     context_id: str = DEFAULT_CONTEXT_ID,
@@ -588,7 +589,7 @@ async def _ws_proxy_handler(
     try:
         await _ws_proxy(
             ws,
-            session_id,
+            path,
             user_id,
             policy_id=policy_id,
             context_id=context_id,
@@ -604,7 +605,7 @@ async def _ws_proxy_handler(
 
 async def _ws_proxy(
     ws: WebSocket,
-    session_id: str,
+    path: str,
     user_id: str,
     policy_id: str = "default",
     context_id: str = DEFAULT_CONTEXT_ID,
@@ -623,7 +624,9 @@ async def _ws_proxy(
     max_retries = 5
     upstream = None
     for attempt in range(max_retries):
-        upstream_url = f"ws://{instance.host}:{instance.port}/api/terminals/{session_id}"
+        upstream_url = f"ws://{instance.host}:{instance.port}/{quote(path, safe='/')}"
+        if ws.query_params:
+            upstream_url += f"?{ws.query_params}"
         try:
             upstream = await websockets.connect(
                 upstream_url,
@@ -658,11 +661,13 @@ async def _ws_proxy(
 
     try:
         async with upstream:
-            await upstream.send(json.dumps({
-                "type": "auth",
-                "token": instance.api_key,
-                "chat_id": ws.headers.get("x-session-id", ""),
-            }))
+            # Browser views authenticate upstream with the capability in the URL.
+            if not path.startswith("browser/view/"):
+                await upstream.send(json.dumps({
+                    "type": "auth",
+                    "token": instance.api_key,
+                    "chat_id": ws.headers.get("x-session-id", ""),
+                }))
 
             async def _client_to_upstream():
                 try:
@@ -712,7 +717,7 @@ async def ws_terminal_proxy(
     except ValueError as exc:
         await ws.close(code=4004, reason=str(exc))
         return
-    await _ws_proxy_handler(ws, session_id, effective_user, context_id=context_id)
+    await _ws_proxy_handler(ws, f"api/terminals/{session_id}", effective_user, context_id=context_id)
 
 
 @router.websocket("/p/{policy_id}/api/terminals/{session_id}")
@@ -740,9 +745,52 @@ async def ws_policy_terminal_proxy(
 
     await _ws_proxy_handler(
         ws,
-        session_id,
+        f"api/terminals/{session_id}",
         effective_user,
         policy_id=_id,
         context_id=context_id,
         spec=spec,
+    )
+
+
+@router.websocket("/{path:path}")
+@router.websocket("/p/{policy_id}/{path:path}")
+async def ws_proxy(
+    ws: WebSocket,
+    path: str,
+    policy_id: Optional[str] = None,
+    user_id: str = Query(""),
+    context_id: str = Query(DEFAULT_CONTEXT_ID),
+):
+    if path.startswith("browser/view/"):
+        try:
+            verified_id = await verify_api_key(ws.headers.get("authorization"))
+            user_id = ws.headers.get("x-user-id", "")
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Missing X-User-Id")
+            effective_user = await verify_user_id(verified_id, user_id)
+        except HTTPException as exc:
+            await ws.close(code=4001, reason=str(exc.detail))
+            return
+        await ws.accept()
+    else:
+        effective_user = await _validate_ws_auth(ws, user_id)
+        if effective_user is None:
+            return
+
+    try:
+        spec = None
+        if policy_id is not None:
+            policy_id, spec = await _resolve_policy_spec(policy_id)
+        context_id = _context_from_websocket(ws, context_id)
+    except HTTPException:
+        await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
+        return
+    except ValueError as exc:
+        await ws.close(code=4004, reason=str(exc))
+        return
+
+    await _ws_proxy_handler(
+        ws, path, effective_user, policy_id=policy_id or "default",
+        context_id=context_id, spec=spec,
     )
