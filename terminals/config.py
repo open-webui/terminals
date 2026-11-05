@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     proxy_read_timeout_seconds: float = 360
     proxy_write_timeout_seconds: float = 300
     proxy_pool_timeout_seconds: float = 300
+    provision_timeout_seconds: float = 120
 
     @field_validator("replay_body_limit", mode="before")
     @classmethod

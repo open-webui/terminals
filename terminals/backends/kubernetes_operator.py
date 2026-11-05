@@ -390,9 +390,7 @@ class KubernetesOperatorBackend(Backend):
 
         log.warning("Terminal CR %s still exists after %ds wait", name, timeout)
 
-    async def _wait_for_ready(
-        self, name: str, namespace: str, timeout: int = 120
-    ) -> Optional[dict]:
+    async def _wait_for_ready(self, name: str, namespace: str) -> Optional[dict]:
         """Poll the CR status until Running with serviceUrl and apiKeySecret.
 
         Returns a dict with ``service_url`` and ``api_key``, or None on timeout.
@@ -400,6 +398,7 @@ class KubernetesOperatorBackend(Backend):
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
 
+        timeout = settings.provision_timeout_seconds
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -690,7 +689,7 @@ class KubernetesOperatorBackend(Backend):
         name = cr["metadata"]["name"]
         ns = settings.kubernetes_namespace
 
-        ready = await self._wait_for_ready(name, ns, timeout=120)
+        ready = await self._wait_for_ready(name, ns)
         if ready:
             host, port = self._parse_service_url(ready["service_url"])
             return {
@@ -903,7 +902,7 @@ class KubernetesOperatorBackend(Backend):
             # Still provisioning — wait for the operator to bring it up
             name = cr["metadata"]["name"]
             ns = settings.kubernetes_namespace
-            ready = await self._wait_for_ready(name, ns, timeout=120)
+            ready = await self._wait_for_ready(name, ns)
             if ready:
                 host, port = self._parse_service_url(ready["service_url"])
                 info = {
