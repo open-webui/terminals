@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     # Backend selection: "docker", "kubernetes", or "kubernetes-operator"
     backend: str = "docker"
+    network_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     # Docker settings
     image: str = "ghcr.io/open-webui/open-terminal:latest"

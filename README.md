@@ -135,6 +135,7 @@ curl -fsS http://localhost:3000/p/data-science/execute \
 |-------|---------|
 | `image` | Open Terminal image to run |
 | `env` | Environment variables passed to the terminal |
+| `network_profile` | Optional name from `TERMINALS_NETWORK_PROFILES`; omitted uses existing networking defaults |
 | `cpu_limit`, `memory_limit` | Resource limits, such as `"2"` and `"4Gi"` |
 | `storage` | Storage size, such as `"5Gi"`; behavior depends on the backend below |
 | `storage_mode` | Direct Kubernetes: `per-user`, `shared`, or `shared-rwo` |
@@ -144,6 +145,35 @@ curl -fsS http://localhost:3000/p/data-science/execute \
 | `podTemplate` | Kubernetes pod overrides, including volumes, scheduling, and health probes |
 
 Service limits such as `TERMINALS_MAX_CPU`, `TERMINALS_MAX_MEMORY`, and `TERMINALS_ALLOWED_IMAGES` constrain policy settings.
+
+### Network profiles
+
+Define named profiles in the orchestrator's environment, then select one with
+`"network_profile": "restricted"` in a policy or the admin policy editor:
+
+```bash
+TERMINALS_NETWORK_PROFILES='{"restricted":{"docker_network":"terminals-restricted","kubernetes_labels":{"network-tier":"restricted"}}}'
+```
+
+Only the mapping for the active backend is required. Unknown names, missing
+backend mappings, and invalid mapping types are rejected. Omit `network_profile`
+to preserve existing networking behavior.
+
+- **Docker:** `docker_network` selects existing named networks, with the same
+  comma-separated sharding as `TERMINALS_DOCKER_NETWORK`. Attach the orchestrator
+  to every selected network so it can reach terminals by name. Built-in modes
+  such as `host` and `none` are not supported by profiles.
+- **Kubernetes and Kubernetes operator:** `kubernetes_labels` adds pod labels for
+  administrator-installed NetworkPolicies. Profile labels override conflicting
+  pod-template labels; `openwebui.com/` and `app.kubernetes.io/` labels are reserved.
+  The operator uses its existing `podTemplate` support, so no CRD change is needed.
+
+Profiles select configuration; they do not create networks, firewall rules, or
+NetworkPolicies. Configure Docker firewall rules or Kubernetes NetworkPolicies
+and a CNI that enforces them to provide the intended access restrictions. A name
+such as `restricted` alone does not enforce isolation. Allow the orchestrator to
+reach terminal port 8000 and permit DNS if needed. Use the rollout below to apply
+profile changes to existing terminals.
 
 ### Apply changes to existing terminals
 
@@ -275,6 +305,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
 | `TERMINALS_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default Open Terminal container image |
+| `TERMINALS_NETWORK_PROFILES` | `{}` | JSON object mapping profile names to `docker_network` and/or `kubernetes_labels` configuration |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per terminal container/pod |
 | `TERMINALS_MAX_MEMORY` | | Hard cap on memory per terminal container/pod |
 | `TERMINALS_MAX_STORAGE` | | Storage cap. Kubernetes enforces this with PVC sizes; Docker support depends on the storage driver and does not quota the bind-mounted `/home/user`. |

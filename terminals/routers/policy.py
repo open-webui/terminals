@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from terminals.config import settings
+from terminals.backends.base import ProvisioningError
 from terminals.db.session import async_session
 from terminals.routers.auth import verify_admin_api_key
 from terminals.utils.policy_lifecycle import (
@@ -20,6 +21,7 @@ from terminals.utils.kubernetes_security import (
     restricted_env_errors,
 )
 from terminals.utils.parsing import parse_size
+from terminals.utils.network_profiles import resolve_network_profile
 
 router = APIRouter(prefix="/api/v1", tags=["policies"])
 
@@ -35,6 +37,7 @@ class PolicyData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     image: Optional[str] = None
+    network_profile: Optional[str] = None
     env: Optional[dict] = None
     cpu_limit: Optional[str] = None
     memory_limit: Optional[str] = None
@@ -73,6 +76,10 @@ class PolicyLifecycleData(BaseModel):
 def _clamp_policy(data: dict) -> dict:
     """Clamp policy values against env var hard caps."""
     result = {k: v for k, v in data.items() if v is not None}
+    try:
+        resolve_network_profile(result, settings.backend)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     lifecycle_keys = {"reset", "reset_schedule", "reset_timezone", "lifecycle"}
     unexpected = sorted(lifecycle_keys.intersection(result))
     if unexpected:

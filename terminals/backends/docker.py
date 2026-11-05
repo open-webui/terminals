@@ -25,6 +25,7 @@ from terminals.utils.context import (
 from terminals.utils.env import build_terminal_env
 from terminals.utils.docker_mounts import parse_docker_mounts
 from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
+from terminals.utils.network_profiles import resolve_network_profile
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class DockerBackend(Backend):
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
+        profile = resolve_network_profile(spec, "docker")
         docker = await self._get_docker()
         api_key = secrets.token_urlsafe(24)
         context_id = normalize_context_id(context_id)
@@ -92,7 +94,8 @@ class DockerBackend(Backend):
         s = spec or {}
 
         image = s.get("image", settings.image)
-        networks = [name.strip() for name in settings.docker_network.split(",") if name.strip()]
+        network = profile.get("docker_network", settings.docker_network)
+        networks = [name.strip() for name in network.split(",") if name.strip()]
         network_name = None
         if len(networks) == 1:
             network_name = networks[0]
@@ -254,7 +257,8 @@ class DockerBackend(Backend):
 
         # When using a custom Docker network, containers can reach each other
         # by name.  Otherwise, use the published port on the Docker host.
-        if settings.docker_network:
+        network_mode = info.get("HostConfig", {}).get("NetworkMode", "default")
+        if network_mode not in ("default", "bridge", "host", "none", ""):
             host = instance_name
             port = 8000
         else:
