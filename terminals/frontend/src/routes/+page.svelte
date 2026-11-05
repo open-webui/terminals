@@ -36,10 +36,12 @@
 	let token = $state('');
 	let status = $state<AdminStatus | null>(null);
 	let terminals = $state<TerminalRow[]>([]);
+	let usersWithData = $state<string[]>([]);
 	let policies = $state<PolicyRow[]>([]);
 	let error = $state('');
 	let notice = $state('');
 	let loading = $state(false);
+	let cleaningUser = $state<string | null>(null);
 	let editingPolicy = $state<EditingPolicy | null>(null);
 	const envPlaceholder = '{"OPEN_TERMINAL_ALLOWED_DOMAINS":"github.com"}';
 	const podSecurityPlaceholder = '{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}';
@@ -81,10 +83,11 @@
 		loading = true;
 		error = '';
 		try {
-			const [nextStatus, nextTerminals, nextPolicies] = await Promise.all([
+			const [nextStatus, nextTerminals, nextPolicies, nextUsersWithData] = await Promise.all([
 				api<AdminStatus>('/api/v1/status'),
 				api<TerminalRow[]>('/api/v1/terminals'),
-				api<PolicyRow[]>('/api/v1/policies')
+				api<PolicyRow[]>('/api/v1/policies'),
+				api<string[]>('/api/v1/terminals/data')
 			]);
 			const policiesWithLifecycle = await Promise.all(
 				nextPolicies.map(async (policy) => {
@@ -96,6 +99,7 @@
 			);
 			status = nextStatus;
 			terminals = nextTerminals;
+			usersWithData = nextUsersWithData;
 			policies = policiesWithLifecycle;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load';
@@ -147,6 +151,34 @@
 			await loadAll();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to stop terminal';
+		}
+	}
+
+	async function cleanupUser(userId: string) {
+		if (cleaningUser !== null) return;
+		if (!confirm(`Stop all terminals and permanently delete all terminal files for user "${userId}", across all policies and contexts? This cannot be undone.`)) return;
+		error = '';
+		notice = '';
+		cleaningUser = userId;
+		try {
+			await api('/api/v1/terminals/refresh', {
+				method: 'POST',
+				body: JSON.stringify({ user_id: userId, only_idle: false })
+			});
+			const result = await api<{ deleted: number }>('/api/v1/terminals/cleanup', {
+				method: 'POST',
+				body: JSON.stringify({ user_id: userId })
+			});
+			notice = result.deleted
+				? (status?.backend === 'docker'
+					? `Terminal files deleted for user "${userId}".`
+					: `Terminal file deletion requested for user "${userId}". Storage removal may still be pending.`)
+				: `No terminal files found for user "${userId}". Lifecycle records cleared.`;
+			await loadAll();
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to delete user data';
+		} finally {
+			cleaningUser = null;
 		}
 	}
 
@@ -258,14 +290,14 @@
 
 <div class="app-theme min-h-dvh bg-white font-sans antialiased text-gray-700">
 	<div class="grid min-h-dvh grid-cols-1 md:grid-cols-[16.5rem_minmax(0,1fr)]">
-		<aside class="hidden border-r border-gray-200 bg-gray-50/50 px-1.5 py-1.5 md:block">
+		<aside class="hidden border-r border-gray-200/50 bg-gray-50/50 px-1.5 py-1.5 md:block">
 			<div class="mb-1 flex h-7 items-center gap-1.5 px-2 text-xs font-medium text-gray-900">
 				<span class="flex h-3.5 w-3.5 items-center justify-center rounded-[3px] bg-gray-900 text-[8px] text-white">▣</span>
 				<span>Terminals</span>
 			</div>
-			<div class="mb-1 h-px bg-gray-200"></div>
 			<nav class="space-y-px text-xs">
 				<a class="block h-7 rounded-md bg-gray-200/70 px-2 leading-7 font-medium text-gray-900" href="#terminals">Terminals</a>
+				<a class="block h-7 rounded-md px-2 leading-7 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700" href="#user-data">User data</a>
 				<a class="block h-7 rounded-md px-2 leading-7 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700" href="#policies">Policies</a>
 			</nav>
 		</aside>
@@ -359,6 +391,35 @@
 				{/if}
 			</section>
 
+			<section id="user-data" class="mt-5">
+				<h2 class="flex h-7 items-center px-3 text-xs text-gray-500">User data</h2>
+				<p class="px-3 pb-2 text-[11px] text-gray-500">Persisted terminal files, including users with no active terminals.</p>
+				{#if status && status.backend !== 'docker'}
+					<p class="px-3 pb-2 text-[11px] text-gray-500">Shared storage requires separate cleanup and is not listed here.</p>
+				{/if}
+				{#if usersWithData.length === 0}
+					<div class="px-3 py-4 text-xs text-gray-400">No user data found.</div>
+				{:else}
+					<table class="w-full table-fixed border-collapse text-xs">
+						<thead class="text-left text-[11px] font-normal text-gray-500">
+							<tr><th class="h-7 px-3 font-normal">User</th><th class="h-7 w-36 px-3 font-normal text-right">Action</th></tr>
+						</thead>
+						<tbody>
+							{#each usersWithData as userId}
+								<tr class="text-gray-700 hover:bg-gray-50">
+									<td class="h-7 truncate px-3" title={userId}>{userId}</td>
+									<td class="h-7 px-3 text-right">
+										<button class="rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50" type="button" disabled={cleaningUser !== null} onclick={() => cleanupUser(userId)}>
+											{cleaningUser === userId ? 'Deleting…' : 'Delete user data'}
+										</button>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			</section>
+
 			<section id="policies" class="mt-5">
 				<div class="flex h-7 items-center justify-between px-3">
 					<h2 class="text-xs text-gray-500">Policies</h2>
@@ -432,7 +493,7 @@
 
 {#if editingPolicy}
 	<div class="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4">
-		<div class="app-theme max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-3xl border border-gray-200 bg-white p-5 shadow-2xl dark:border-white/6 dark:bg-gray-950">
+		<div class="app-theme max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-3xl border border-gray-200/50 bg-white p-5 shadow-2xl dark:border-white/4 dark:bg-gray-950">
 			<div class="mb-5 flex items-center justify-between">
 				<h2 class="text-sm font-medium text-gray-900 dark:text-white">{editingPolicy.existing ? 'Edit policy' : 'Add policy'}</h2>
 				<button class="flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300" type="button" aria-label="Close" onclick={() => (editingPolicy = null)}>
@@ -441,31 +502,31 @@
 			</div>
 
 			<form onsubmit={savePolicy}>
-				<div class="mb-3 border-b border-gray-200 pb-2 text-xs text-gray-400 dark:border-white/6 dark:text-gray-600">Policy</div>
+				<div class="mb-3 border-b border-gray-200/50 pb-2 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Policy</div>
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-					<label class="block text-xs text-gray-600 dark:text-gray-400">ID<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Image<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">CPU<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Memory<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="memory_limit" value={editingPolicy.data.memory_limit || ''} placeholder="1Gi" /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="storage" value={editingPolicy.data.storage || ''} placeholder="5Gi" /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage mode<select class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="storage_mode" value={editingPolicy.data.storage_mode || ''}>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">ID<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Image<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">CPU<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Memory<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="memory_limit" value={editingPolicy.data.memory_limit || ''} placeholder="1Gi" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="storage" value={editingPolicy.data.storage || ''} placeholder="5Gi" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Storage mode<select class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="storage_mode" value={editingPolicy.data.storage_mode || ''}>
 						<option value="">default</option>
 						<option value="per-user">per-user</option>
 						<option value="shared">shared</option>
 						<option value="shared-rwo">shared-rwo</option>
 					</select></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Idle timeout<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
-					<label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400"><input class="h-4 w-4 rounded border-gray-300" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Idle timeout<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
+					<label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400"><input class="h-4 w-4 rounded border-gray-300/50" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
 				</div>
-				<div class="mb-3 mt-5 border-b border-gray-200 pb-2 text-xs text-gray-400 dark:border-white/6 dark:text-gray-600">Lifecycle</div>
+				<div class="mb-3 mt-5 border-b border-gray-200/50 pb-2 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Lifecycle</div>
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-					<label class="block text-xs text-gray-600 dark:text-gray-400">Reset timezone<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
-					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Scheduled reset<input class="mt-1 h-7 w-full rounded-lg border border-gray-200 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400 dark:border-white/8 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/20" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Reset timezone<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Scheduled reset<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
 				</div>
-				<div class="sticky bottom-0 -mx-5 mt-4 flex justify-end gap-3 border-t border-gray-200 bg-white px-5 py-3 dark:border-white/6 dark:bg-gray-950">
+				<div class="sticky bottom-0 -mx-5 mt-4 flex justify-end gap-3 border-t border-gray-200/50 bg-white px-5 py-3 dark:border-white/4 dark:bg-gray-950">
 					<button class="text-xs text-gray-400 transition-colors hover:text-gray-700 dark:hover:text-gray-300" type="button" onclick={() => (editingPolicy = null)}>Cancel</button>
 					<button class="text-xs text-gray-600 transition-colors hover:text-gray-900 dark:text-gray-400 dark:hover:text-white" type="submit">Save</button>
 				</div>

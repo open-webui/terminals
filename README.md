@@ -248,6 +248,41 @@ Use `user_id` to target one user, `policy_id` to target one policy, and
 refreshing. `only_idle` defaults to `true` so active users are not
 interrupted.
 
+### Cleaning up a deleted user's data
+
+Deleting an Open WebUI account does not notify Terminals. After revoking the
+user's access, find them in the admin UI's **User data** table and select
+**Delete user data**. Confirmation stops their tracked terminals, waits for
+terminating resources, and deletes their persisted terminal files. If terminals
+remain, cleanup fails without deleting files.
+
+The table discovers users from Docker data directories or labeled per-user PVCs,
+including users with no active terminals. The same list is available through
+`GET /api/v1/terminals/data`. To clean up through the API, stop the user's terminals
+first, then call:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/terminals/cleanup \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"deleted-user-id"}'
+```
+
+This permanently deletes the user's Docker workspace (including all chat and
+automation contexts) or requests deletion of their labeled per-user PVCs, even
+when no terminal is tracked. It also removes their lifecycle state and logs each
+storage deletion. The response counts deleted workspace directories or PVC
+deletion requests; repeating cleanup is safe. The endpoint returns `409` while
+terminal resources remain. The existing refresh endpoint with `user_id` and
+`only_idle:false` can stop tracked terminals; remove any remaining resources
+before retrying cleanup.
+
+Shared Kubernetes PVCs require clearing only the user's subdirectory separately;
+this endpoint refuses cleanup when shared storage exists. PVC deletion follows
+the storage class's reclaim policy, so retained volumes and backups require
+separate removal. Account deletion workflows can call this endpoint explicitly;
+failed authentication never triggers data deletion.
+
 ## Configuration
 
 All settings are configured through environment variables prefixed with `TERMINALS_`, or via a `.env` file.

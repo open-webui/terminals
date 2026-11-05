@@ -382,6 +382,34 @@ class DockerBackend(Backend):
             else:
                 child.unlink(missing_ok=True)
 
+    async def list_user_data(self) -> list[str]:
+        root = Path(settings.docker_data_dir)
+        if not root.exists():
+            return []
+        return sorted(path.name for path in root.iterdir() if not path.is_symlink() and path.is_dir())
+
+    async def cleanup_user(self, user_id: str) -> int:
+        home_dir = self._home_dir(user_id)
+        root = Path(settings.docker_data_dir).resolve()
+        if Path(user_id).name != user_id or home_dir.is_symlink() or home_dir.resolve().parent != root:
+            raise ValueError("User workspace must be a direct directory under the data directory")
+
+        docker = await self._get_docker()
+        containers = await docker.containers.list(
+            all=True,
+            filters={"label": ["app.kubernetes.io/managed-by=terminals"]},
+        )
+        for container in containers:
+            info = await container.show()
+            if (info.get("Config", {}).get("Labels") or {}).get("openwebui.com/user-id") == user_id:
+                raise RuntimeError("Remove the user's terminal containers before cleanup")
+
+        if not home_dir.exists():
+            return 0
+        await asyncio.to_thread(shutil.rmtree, home_dir)
+        log.info("Deleted workspace for user=%s path=%s", user_id, home_dir)
+        return 1
+
     async def status(self, instance_id: str) -> str:
         docker = await self._get_docker()
         try:
