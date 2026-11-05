@@ -135,6 +135,16 @@ async def verify_admin_api_key(
     return None
 
 
+async def verify_spec_access(
+    authorization: Optional[str] = Header(None),
+) -> Optional[str]:
+    """Allow the admin API key for tool discovery before a user is involved."""
+    scheme, _, token = (authorization or "").partition(" ")
+    if settings.api_key and scheme.lower() == "bearer" and token == settings.api_key:
+        return None
+    return await verify_api_key(authorization)
+
+
 async def verify_user_id(
     verified_id: Optional[str] = Depends(verify_api_key),
     x_user_id: str = Header(..., alias="X-User-Id"),
