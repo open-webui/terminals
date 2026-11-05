@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-05
+
+### Added
+
+- Added optional network profiles to terminal policies on Docker and both Kubernetes deployment modes. Different policies can now select administrator-configured networks and access rules, such as access to internal services, internet-only access, or no external access.
+- Added a **Network profile** field to the admin policy editor. Leaving it blank keeps the existing networking defaults. Unknown profiles and profiles missing settings for the selected deployment type are rejected instead of silently using the default network.
+- Added setup instructions for defining profiles with `TERMINALS_NETWORK_PROFILES` and applying them to existing terminals. Administrators must create the networks and access rules themselves; naming a profile `restricted` does not block traffic on its own. Docker host networking is not supported by profiles.
+
+### Fixed
+
+- Fixed Docker reconnections using the service's default network setting instead of the terminal's actual network. Terminals on policy-specific networks can now be reached correctly when Terminals restarts or reconnects to an existing container.
+
 ## [0.2.9] - 2026-11-05
 
 ### Added
