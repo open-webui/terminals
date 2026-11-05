@@ -102,7 +102,7 @@ class DockerBackend(Backend):
 
         host_config: dict = {
             "Binds": [f"{host_data_dir}:/home/user"],
-            "PublishAllPorts": True,
+            "PublishAllPorts": not network_name,
         }
         if self._mounts:
             host_config["Mounts"] = self._mounts
