@@ -20,6 +20,7 @@ from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend, ProvisioningError, RefreshResult
+from terminals.backends.kubernetes import _cleanup_user_pvcs, _list_user_data
 from terminals.config import settings
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
@@ -491,6 +492,33 @@ class KubernetesOperatorBackend(Backend):
                     return
                 raise
             await asyncio.sleep(0.5)
+
+    async def list_user_data(self) -> list[str]:
+        api_client = await self._ensure_client()
+        return await _list_user_data(client.CoreV1Api(api_client))
+
+    async def cleanup_user(self, user_id: str) -> int:
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        for attempt in range(61):
+            crs = await custom.list_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=settings.kubernetes_namespace,
+                plural=self._plural,
+                label_selector="app.kubernetes.io/managed-by=terminals",
+            )
+            matching = [
+                item for item in crs.get("items", [])
+                if item.get("metadata", {}).get("labels", {}).get("openwebui.com/user-id") == user_id
+                or item.get("spec", {}).get("userId") == user_id
+            ]
+            if not matching:
+                break
+            if attempt == 60 or any(not item.get("metadata", {}).get("deletionTimestamp") for item in matching):
+                raise RuntimeError("Terminal resources still exist; user data has not been deleted. Remove them and retry.")
+            await asyncio.sleep(0.5)
+        return await _cleanup_user_pvcs(client.CoreV1Api(api_client), user_id)
 
     async def reset(
         self,

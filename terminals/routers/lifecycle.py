@@ -3,7 +3,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from terminals.config import settings
 from terminals.db.session import async_session
@@ -26,6 +26,10 @@ class StopRequest(BaseModel):
     user_id: str
     policy_id: str = "default"
     context_id: str = DEFAULT_CONTEXT_ID
+
+
+class CleanupRequest(BaseModel):
+    user_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@-]*$")
 
 
 async def _policy_count() -> int:
@@ -100,3 +104,33 @@ async def refresh_terminals(request: Request, body: RefreshRequest):
         "reset": result.reset,
         "skipped_active": result.skipped_active,
     }
+
+
+@router.get("/terminals/data", dependencies=[Depends(verify_admin_api_key)])
+async def list_user_data(request: Request):
+    """List users with persisted terminal files."""
+    return await request.app.state.backend.list_user_data()
+
+
+@router.post("/terminals/cleanup", dependencies=[Depends(verify_admin_api_key)])
+async def cleanup_user(request: Request, body: CleanupRequest):
+    """Permanently remove one deleted user's inactive workspace storage."""
+    try:
+        deleted = await request.app.state.backend.cleanup_user(body.user_id)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if async_session is not None:
+        from sqlalchemy import delete
+
+        from terminals.models.policy import PolicyLifecycleState
+
+        async with async_session() as session:
+            await session.execute(
+                delete(PolicyLifecycleState).where(PolicyLifecycleState.user_id == body.user_id)
+            )
+            await session.commit()
+    return {"deleted": deleted}

@@ -102,6 +102,14 @@ class Backend(ABC):
         """Delete persisted files for a user terminal."""
         raise NotImplementedError("Reset is not supported by this backend")
 
+    async def list_user_data(self) -> list[str]:
+        """List users with persisted terminal files, including inactive users."""
+        raise NotImplementedError("Listing user data is not supported by this backend")
+
+    async def cleanup_user(self, user_id: str) -> int:
+        """Remove an inactive user's persisted workspace storage."""
+        raise NotImplementedError("User cleanup is not supported by this backend")
+
     # ------------------------------------------------------------------
     # Instance tracking
     # ------------------------------------------------------------------

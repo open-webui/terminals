@@ -82,6 +82,58 @@ def _base_labels(user_id: str) -> dict[str, str]:
     return labels
 
 
+async def _list_user_data(core) -> list[str]:
+    pvcs = await core.list_namespaced_persistent_volume_claim(
+        settings.kubernetes_namespace, label_selector="app.kubernetes.io/managed-by=terminals"
+    )
+    return sorted({
+        pvc.metadata.labels["openwebui.com/user-id"] for pvc in pvcs.items
+        if (pvc.metadata.labels or {}).get("openwebui.com/user-id")
+    })
+
+
+async def _cleanup_user_pvcs(core, user_id: str) -> int:
+    ns = settings.kubernetes_namespace
+    pvcs = await core.list_namespaced_persistent_volume_claim(
+        ns, label_selector="app.kubernetes.io/managed-by=terminals"
+    )
+    if any(pvc.metadata.name == f"terminals-shared-{ns}" for pvc in pvcs.items):
+        raise RuntimeError("Shared PVC storage requires clearing the user's subdirectory separately")
+    claims = {
+        pvc.metadata.name: pvc for pvc in pvcs.items
+        if (pvc.metadata.labels or {}).get("openwebui.com/user-id") == user_id
+    }
+    for attempt in range(61):
+        pods = await core.list_namespaced_pod(ns)
+        matching = [
+            pod for pod in pods.items
+            if (pod.metadata.labels or {}).get("openwebui.com/user-id") == user_id or any(
+                volume.persistent_volume_claim
+                and volume.persistent_volume_claim.claim_name in claims
+                for volume in pod.spec.volumes or []
+            )
+        ]
+        if not matching:
+            break
+        if attempt == 60 or any(not pod.metadata.deletion_timestamp for pod in matching):
+            raise RuntimeError("Terminal pods still exist; user data has not been deleted. Remove them and retry.")
+        await asyncio.sleep(0.5)
+    deleted = 0
+    for name, pvc in claims.items():
+        try:
+            await core.delete_namespaced_persistent_volume_claim(
+                name, ns,
+                body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=pvc.metadata.uid)),
+            )
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+            continue
+        deleted += 1
+        log.info("Requested workspace PVC deletion for user=%s namespace=%s name=%s", user_id, ns, name)
+    return deleted
+
+
 def _deep_merge(*items: dict | None) -> dict:
     result = {}
     for item in items:
@@ -526,6 +578,14 @@ class KubernetesBackend(Backend):
         self._uid_cache.pop(instance_id, None)
 
         # Note: PVC is intentionally kept for data persistence.
+
+    async def list_user_data(self) -> list[str]:
+        api_client = await self._ensure_client()
+        return await _list_user_data(client.CoreV1Api(api_client))
+
+    async def cleanup_user(self, user_id: str) -> int:
+        api_client = await self._ensure_client()
+        return await _cleanup_user_pvcs(client.CoreV1Api(api_client), user_id)
 
     async def reset(
         self,
