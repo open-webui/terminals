@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-11-05
+
+### Fixed
+
+- Fixed Open Terminal browser and desktop live views, live updates, and streaming command output failing to connect through Terminals, including connections using named policies.
+- Fixed manual and scheduled file resets being rejected by Kubernetes clusters with strict security or resource rules. Resets now use the terminal's configured image, security settings, and placement rules in both Kubernetes deployment modes.
+- Fixed Kubernetes operator deployments leaving users unable to reconnect after a terminal pod was deleted. Terminals now recreates the missing terminal on the next access while keeping files in persistent storage, even if the operator missed the deletion.
+- Fixed errors appearing after requests finished because the connection to Open Terminal was not closed correctly. Completed responses now release that connection without the cleanup error.
+
 ## [0.2.6] - 2026-11-05
 
 ### Fixed
