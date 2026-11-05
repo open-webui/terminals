@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-11-05
+
+### Added
+
+- Added a configurable startup wait for Kubernetes operator deployments so slower terminal starts can finish before users see a timeout. Set `TERMINALS_PROVISION_TIMEOUT_SECONDS=300` to wait up to five minutes. The default remains 120 seconds.
+
+### Fixed
+
+- Fixed Docker terminal creation failing when the selected image had not been downloaded to the host. Terminals now downloads missing images automatically before starting the terminal.
+- Fixed named policies ignoring the configured Kubernetes image and using the general default instead, which could launch `latest` instead of a pinned version. Both Kubernetes deployment modes now respect the Kubernetes image setting unless the policy selects its own image.
+- Fixed Kubernetes operator deployments making users wait for a timeout when the cluster had already rejected a terminal start because of exhausted capacity or permissions. Requests now report the reason promptly, and the operator stops retrying that rejected start instead of creating an unwanted terminal later. A new user request can retry.
+
 ## [0.2.7] - 2026-11-05
 
 ### Fixed
