@@ -14,12 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Docker terminal files being stored outside the intended workspace folder when Terminals runs in a container. The optional `TERMINALS_DOCKER_HOST_DATA_DIR` setting lets terminal creation and file resets use the same files when the host and container see that folder at different paths. The Docker quick start now includes this setup.
 - Fixed terminals on named Docker networks opening unnecessary ports on the host. Newly created terminals on those networks are reached through the Docker network without publishing a host port.
 
-### Upgrade notes
-
-- Back up and move existing databases and workspaces before adopting the updated Docker storage layout. Existing files and terminal mounts are not moved automatically. See the [Docker quick start](README.md#docker-recommended-for-single-node) for the paths to use.
-- For Kubernetes operator deployments, apply the updated terminal definition and update both Terminals and its operator. Existing terminal definitions with a 30-minute timeout must be changed to `0` if idle cleanup should be disabled.
-- Recreate existing terminals on named Docker networks to remove their previously published host ports.
-
 ## [0.2.5] - 2026-10-16
 
 ### Fixed
