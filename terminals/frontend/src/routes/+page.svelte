@@ -303,7 +303,7 @@
 		</aside>
 
 		<main class="min-w-0">
-			<div class="flex h-9 items-center px-3">
+			<div class="flex h-8 items-center px-3">
 				<h1 class="px-0.5 text-xs font-medium text-gray-700">Terminals</h1>
 				<div class="ml-4 flex items-center gap-3 text-[11px] text-gray-500">
 					<span>{status?.backend ?? '-'}</span>
@@ -336,43 +336,43 @@
 				</div>
 			</div>
 
-			<section id="terminals" class="pt-3">
-				<div class="flex h-7 items-center justify-between px-3">
+			<section id="terminals" class="pt-1">
+				<div class="flex h-6 items-center justify-between px-3">
 					<h2 class="text-xs text-gray-500">Active terminals</h2>
 				</div>
 				{#if terminals.length === 0}
-					<div class="px-3 py-4 text-xs text-gray-400">No active terminals.</div>
+					<div class="px-3 py-2 text-xs text-gray-400">No active terminals.</div>
 				{:else}
 					<div class="overflow-x-auto">
 						<table class="w-full table-fixed border-collapse text-xs">
 							<thead class="text-left text-[11px] font-normal text-gray-500">
 								<tr>
-									<th class="h-7 w-[30%] px-3 font-normal">User</th>
-									<th class="h-7 w-[30%] px-2 font-normal">Policy</th>
-									<th class="h-7 px-2 font-normal">Status</th>
-									<th class="hidden h-7 px-2 font-normal sm:table-cell">Last active</th>
-									<th class="hidden h-7 px-2 font-normal lg:table-cell">Instance</th>
-									<th class="h-7 w-8 px-1"></th>
+									<th class="h-6 w-[30%] px-3 font-normal">User</th>
+									<th class="h-6 w-[30%] px-3 font-normal">Policy</th>
+									<th class="h-6 px-2 font-normal">Status</th>
+									<th class="hidden h-6 px-2 font-normal sm:table-cell">Last active</th>
+									<th class="hidden h-6 px-2 font-normal lg:table-cell">Instance</th>
+									<th class="h-6 w-8 px-1"></th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each terminals as terminal}
 									<tr class="text-gray-700 hover:bg-gray-50">
-										<td class="h-7 truncate px-3">{terminal.user_id}</td>
-										<td class="h-7 truncate px-2">
+										<td class="h-6 truncate px-3">{terminal.user_id}</td>
+										<td class="h-6 truncate px-2">
 											{policies.some((policy) => policy.id === terminal.policy_id)
 												? terminal.policy_id
 												: 'Service defaults'}
 										</td>
-										<td class="h-7 truncate px-2">
+										<td class="h-6 truncate px-2">
 											<span class="inline-flex items-center gap-2">
 												<span class={`h-1.5 w-1.5 rounded-full ${statusClass(terminal.status)}`}></span>
 												{terminal.status}
 											</span>
 										</td>
-										<td class="hidden h-7 truncate px-2 sm:table-cell">{lastActive(terminal.last_active_at)}</td>
-										<td class="hidden h-7 truncate px-2 lg:table-cell">{terminal.instance_name || terminal.instance_id}</td>
-										<td class="h-7 px-1 text-right">
+										<td class="hidden h-6 truncate px-2 sm:table-cell">{lastActive(terminal.last_active_at)}</td>
+										<td class="hidden h-6 truncate px-2 lg:table-cell">{terminal.instance_name || terminal.instance_id}</td>
+										<td class="h-6 px-1 text-right">
 											<button
 												class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
 												type="button"
@@ -391,24 +391,24 @@
 				{/if}
 			</section>
 
-			<section id="user-data" class="mt-5">
-				<h2 class="flex h-7 items-center px-3 text-xs text-gray-500">User data</h2>
-				<p class="px-3 pb-2 text-[11px] text-gray-500">Persisted terminal files, including users with no active terminals.</p>
+			<section id="user-data" class="mt-3">
+				<h2 class="flex h-6 items-center px-3 text-xs text-gray-500">User data</h2>
+				<p class="px-3 pb-1 text-[11px] text-gray-500">Persisted terminal files, including users with no active terminals.</p>
 				{#if status && status.backend !== 'docker'}
-					<p class="px-3 pb-2 text-[11px] text-gray-500">Shared storage requires separate cleanup and is not listed here.</p>
+					<p class="px-3 pb-1 text-[11px] text-gray-500">Shared storage requires separate cleanup and is not listed here.</p>
 				{/if}
 				{#if usersWithData.length === 0}
-					<div class="px-3 py-4 text-xs text-gray-400">No user data found.</div>
+					<div class="px-3 py-2 text-xs text-gray-400">No user data found.</div>
 				{:else}
 					<table class="w-full table-fixed border-collapse text-xs">
 						<thead class="text-left text-[11px] font-normal text-gray-500">
-							<tr><th class="h-7 px-3 font-normal">User</th><th class="h-7 w-36 px-3 font-normal text-right">Action</th></tr>
+							<tr><th class="h-6 px-3 font-normal">User</th><th class="h-6 w-36 px-3 font-normal text-right">Action</th></tr>
 						</thead>
 						<tbody>
 							{#each usersWithData as userId}
 								<tr class="text-gray-700 hover:bg-gray-50">
-									<td class="h-7 truncate px-3" title={userId}>{userId}</td>
-									<td class="h-7 px-3 text-right">
+									<td class="h-6 truncate px-3" title={userId}>{userId}</td>
+									<td class="h-6 px-3 text-right">
 										<button class="rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50" type="button" disabled={cleaningUser !== null} onclick={() => cleanupUser(userId)}>
 											{cleaningUser === userId ? 'Deleting…' : 'Delete user data'}
 										</button>
@@ -420,8 +420,8 @@
 				{/if}
 			</section>
 
-			<section id="policies" class="mt-5">
-				<div class="flex h-7 items-center justify-between px-3">
+			<section id="policies" class="mt-3">
+				<div class="flex h-6 items-center justify-between px-3">
 					<h2 class="text-xs text-gray-500">Policies</h2>
 					<button
 					class="flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
@@ -434,33 +434,33 @@
 					</button>
 				</div>
 				{#if policies.length === 0}
-					<div class="px-3 py-4 text-xs text-gray-400">No policies configured.</div>
+					<div class="px-3 py-2 text-xs text-gray-400">No policies configured.</div>
 				{:else}
 					<div class="overflow-x-auto">
 						<table class="w-full table-fixed border-collapse text-xs">
 							<thead class="text-left text-[11px] font-normal text-gray-500">
 								<tr>
-									<th class="h-7 w-[30%] px-3 font-normal md:w-[20%]">ID</th>
-									<th class="hidden h-7 px-2 font-normal md:table-cell md:w-[35%]">Image</th>
-									<th class="h-7 px-2 font-normal">CPU</th>
-									<th class="h-7 px-2 font-normal">Memory</th>
-									<th class="hidden h-7 px-2 font-normal sm:table-cell">Idle</th>
-									<th class="h-7 px-2 font-normal">Mode</th>
-									<th class="hidden h-7 px-2 font-normal lg:table-cell">Reset</th>
-									<th class="h-7 w-24 px-2"></th>
+									<th class="h-6 w-[30%] px-3 font-normal md:w-[20%]">ID</th>
+									<th class="hidden h-6 px-2 font-normal md:table-cell md:w-[35%]">Image</th>
+									<th class="h-6 px-2 font-normal">CPU</th>
+									<th class="h-6 px-2 font-normal">Memory</th>
+									<th class="hidden h-6 px-2 font-normal sm:table-cell">Idle</th>
+									<th class="h-6 px-2 font-normal">Mode</th>
+									<th class="hidden h-6 px-2 font-normal lg:table-cell">Reset</th>
+									<th class="h-6 w-24 px-2"></th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each policies as policy}
 									<tr class="text-gray-700 hover:bg-gray-50">
-										<td class="h-7 truncate px-3">{policy.id}</td>
-										<td class="hidden h-7 truncate px-2 md:table-cell">{policyValue(policy, 'image', 'default')}</td>
-										<td class="h-7 truncate px-2">{policyValue(policy, 'cpu_limit')}</td>
-										<td class="h-7 truncate px-2">{policyValue(policy, 'memory_limit')}</td>
-										<td class="hidden h-7 truncate px-2 sm:table-cell">{policyValue(policy, 'idle_timeout_minutes')}</td>
-										<td class="h-7 truncate px-2">{restrictedLabel(policy)}</td>
-										<td class="hidden h-7 truncate px-2 lg:table-cell">{resetSchedule(policy)}</td>
-										<td class="h-7 px-2 text-right">
+										<td class="h-6 truncate px-3">{policy.id}</td>
+										<td class="hidden h-6 truncate px-2 md:table-cell">{policyValue(policy, 'image', 'default')}</td>
+										<td class="h-6 truncate px-2">{policyValue(policy, 'cpu_limit')}</td>
+										<td class="h-6 truncate px-2">{policyValue(policy, 'memory_limit')}</td>
+										<td class="hidden h-6 truncate px-2 sm:table-cell">{policyValue(policy, 'idle_timeout_minutes')}</td>
+										<td class="h-6 truncate px-2">{restrictedLabel(policy)}</td>
+										<td class="hidden h-6 truncate px-2 lg:table-cell">{resetSchedule(policy)}</td>
+										<td class="h-6 px-2 text-right">
 											<div class="inline-flex items-center gap-0.5 whitespace-nowrap">
 											<button class="inline-flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700" type="button" aria-label="Roll out to idle terminals" title="Roll out to idle terminals" onclick={() => rolloutPolicy(policy)}>
 												<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.67" /><path d="M4 4v4.67h4.67" /></svg>
@@ -493,8 +493,8 @@
 
 {#if editingPolicy}
 	<div class="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4">
-		<div class="app-theme max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-3xl border border-gray-200/50 bg-white p-5 shadow-2xl dark:border-white/4 dark:bg-gray-950">
-			<div class="mb-5 flex items-center justify-between">
+		<div class="app-theme max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-auto rounded-3xl border border-gray-200/50 bg-white px-5 py-4 shadow-2xl dark:border-white/4 dark:bg-gray-950">
+			<div class="mb-3 flex items-center justify-between">
 				<h2 class="text-sm font-medium text-gray-900 dark:text-white">{editingPolicy.existing ? 'Edit policy' : 'Add policy'}</h2>
 				<button class="flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300" type="button" aria-label="Close" onclick={() => (editingPolicy = null)}>
 					<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
@@ -502,8 +502,8 @@
 			</div>
 
 			<form onsubmit={savePolicy}>
-				<div class="mb-3 border-b border-gray-200/50 pb-2 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Policy</div>
-				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				<div class="mb-2 border-b border-gray-200/50 pb-1 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Policy</div>
+				<div class="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
 					<label class="block text-xs text-gray-600 dark:text-gray-400">ID<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="id" value={editingPolicy.id} readonly={editingPolicy.existing} /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Image<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="image" value={editingPolicy.data.image || ''} placeholder="ghcr.io/open-webui/open-terminal:latest" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">CPU<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="cpu_limit" value={editingPolicy.data.cpu_limit || ''} placeholder="1" /></label>
@@ -521,12 +521,12 @@
 					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Container security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="container_security_context" placeholder={containerSecurityPlaceholder}>{editingPolicy.data.container_security_context ? JSON.stringify(editingPolicy.data.container_security_context, null, 2) : ''}</textarea></label>
 				</div>
-				<div class="mb-3 mt-5 border-b border-gray-200/50 pb-2 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Lifecycle</div>
-				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				<div class="mb-2 mt-3 border-b border-gray-200/50 pb-1 text-xs text-gray-400 dark:border-white/4 dark:text-gray-600">Lifecycle</div>
+				<div class="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Reset timezone<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="reset_timezone" value={editingPolicy.lifecycle.reset?.timezone || ''} placeholder="UTC" /></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Scheduled reset<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="reset_schedule" value={editingPolicy.lifecycle.reset?.schedule || ''} placeholder="@weekly, @monthly, cron, or ISO date" /></label>
 				</div>
-				<div class="sticky bottom-0 -mx-5 mt-4 flex justify-end gap-3 border-t border-gray-200/50 bg-white px-5 py-3 dark:border-white/4 dark:bg-gray-950">
+				<div class="sticky bottom-0 -mx-5 mt-3 flex justify-end gap-2 border-t border-gray-200/50 bg-white px-5 py-2 dark:border-white/4 dark:bg-gray-950">
 					<button class="text-xs text-gray-400 transition-colors hover:text-gray-700 dark:hover:text-gray-300" type="button" onclick={() => (editingPolicy = null)}>Cancel</button>
 					<button class="text-xs text-gray-600 transition-colors hover:text-gray-900 dark:text-gray-400 dark:hover:text-white" type="submit">Save</button>
 				</div>
