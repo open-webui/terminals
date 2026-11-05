@@ -163,6 +163,40 @@ policy `podTemplate` field and native Kubernetes volumes instead:
 Read-only mounts prevent writes through that mount, but they are not a security
 boundary if terminal containers are privileged or can access the Docker socket.
 
+### Kubernetes health probes
+
+Both Kubernetes backends accept probe overrides in the policy's `podTemplate`.
+Each supplied probe replaces the default, so include its check (such as
+`httpGet`) as well as timing settings. For slower hardware:
+
+```json
+{
+  "podTemplate": {
+    "spec": {
+      "containers": [{
+        "name": "open-terminal",
+        "readinessProbe": {
+          "httpGet": {"path": "/health", "port": 8000},
+          "initialDelaySeconds": 15,
+          "periodSeconds": 10,
+          "timeoutSeconds": 5,
+          "failureThreshold": 6
+        },
+        "livenessProbe": {
+          "httpGet": {"path": "/health", "port": 8000},
+          "initialDelaySeconds": 60,
+          "periodSeconds": 15,
+          "timeoutSeconds": 5,
+          "failureThreshold": 6
+        }
+      }]
+    }
+  }
+```
+
+Omitted probes keep their existing defaults. Refresh existing terminals to apply
+the updated policy on their next access.
+
 ### Policy lifecycle
 
 Policies define what gets provisioned. Policy lifecycle config defines ongoing maintenance for that policy, such as scheduled resets of persisted terminal files. Due resets refresh matching terminals even when they are still running, so long-lived browser sessions do not block scheduled cleanup.

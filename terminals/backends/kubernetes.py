@@ -153,6 +153,9 @@ def _apply_pod_template(pod_manifest: dict, pod_template: dict | None) -> dict:
                     {},
                 )
                 generated_container = generated_spec["containers"][0]
+                for field in ("readinessProbe", "livenessProbe"):
+                    if field in template_container:
+                        container[field] = template_container[field]
                 for field in ("env", "ports", "volumeMounts"):
                     container[field] = _merge_by_name(
                         template_container.get(field), generated_container.get(field)
