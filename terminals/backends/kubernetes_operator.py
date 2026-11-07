@@ -19,7 +19,7 @@ from typing import Optional
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
-from terminals.backends.base import Backend, ProvisioningError, RefreshResult
+from terminals.backends.base import Backend, ProvisioningError, RefreshResult, parse_started_at
 from terminals.backends.kubernetes import _cleanup_user_pvcs, _list_user_data
 from terminals.config import settings
 from terminals.utils.network_profiles import resolve_network_profile
@@ -868,6 +868,7 @@ class KubernetesOperatorBackend(Backend):
                     info = {
                         "instance_id": cr["metadata"]["uid"],
                         "instance_name": cr["metadata"]["name"],
+                        "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
                         "api_key": api_key,
                         "host": host,
                         "port": port,
@@ -926,6 +927,7 @@ class KubernetesOperatorBackend(Backend):
                     info = {
                         "instance_id": cr["metadata"]["uid"],
                         "instance_name": cr["metadata"]["name"],
+                        "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
                         "api_key": api_key,
                         "host": host,
                         "port": port,
@@ -945,6 +947,7 @@ class KubernetesOperatorBackend(Backend):
                 info = {
                     "instance_id": cr["metadata"]["uid"],
                     "instance_name": cr["metadata"]["name"],
+                    "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
                     "api_key": ready["api_key"],
                     "host": host,
                     "port": port,
@@ -978,6 +981,7 @@ class KubernetesOperatorBackend(Backend):
                 return {
                     "instance_id": cr["metadata"]["uid"],
                     "instance_name": cr["metadata"]["name"],
+                    "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
                     "api_key": api_key,
                     "host": host,
                     "port": port,

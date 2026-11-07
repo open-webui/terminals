@@ -12,7 +12,7 @@ from typing import Optional
 import aiodocker
 import httpx
 
-from terminals.backends.base import Backend
+from terminals.backends.base import Backend, parse_started_at
 from terminals.config import settings
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
@@ -279,6 +279,7 @@ class DockerBackend(Backend):
             "api_key": api_key,
             "host": host,
             "port": port,
+            "started_at": parse_started_at(info.get("State", {}).get("StartedAt")),
         }
 
     # ------------------------------------------------------------------
