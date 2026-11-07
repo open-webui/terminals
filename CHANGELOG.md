@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-11-07
+
+### Added
+
+- Added an optional maximum terminal lifetime in minutes, configurable for the whole service or through **Max lifetime** in each policy's editor. Once the limit is reached, the terminal stops even while in use, ending running commands. Files in persistent storage are kept, and the next use starts a fresh terminal with those files. The limit is disabled by default.
+
+### Fixed
+
+- Fixed unused terminal tabs preventing idle cleanup by repeatedly sending background connection checks. These checks no longer reset the idle timer; typing and command output still count as activity.
+
 ## [0.3.2] - 2026-11-07
 
 ### Fixed
