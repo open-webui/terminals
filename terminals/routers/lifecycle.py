@@ -53,6 +53,7 @@ async def admin_status(request: Request):
         "backend": settings.backend,
         "image": settings.image,
         "idle_timeout_minutes": settings.idle_timeout_minutes,
+        "max_lifetime_minutes": settings.max_lifetime_minutes,
         "max_cpu": settings.max_cpu,
         "max_memory": settings.max_memory,
         "max_storage": settings.max_storage,

@@ -21,6 +21,16 @@ from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
 log = logging.getLogger(__name__)
 
 
+def parse_started_at(value) -> float:
+    """Epoch seconds for a runtime's ISO start time, or now if unknown."""
+    if isinstance(value, datetime):
+        return value.timestamp()
+    try:
+        return datetime.fromisoformat(str(value)[:19]).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return time.time()
+
+
 class ProvisioningError(RuntimeError):
     """Terminal provisioning failed with a reason suitable for the client."""
 
@@ -195,6 +205,7 @@ class Backend(ABC):
                 user_id, policy_id=policy_id, context_id=context_id, spec=spec
             )
             if result:
+                result.setdefault("started_at", time.time())
                 self._instances[key] = result
                 self._specs[key] = spec or {}
                 self._running_checked_at[key] = time.monotonic()
@@ -472,30 +483,42 @@ class Backend(ABC):
             timeout_min = spec.get(
                 "idle_timeout_minutes", settings.idle_timeout_minutes
             )
-            if not timeout_min or timeout_min <= 0:
+            lifetime_min = spec.get(
+                "max_lifetime_minutes", settings.max_lifetime_minutes
+            )
+            # Instances tracked without a start time count from first sight.
+            started_at = info.setdefault("started_at", time.time())
+            expired = bool(lifetime_min and lifetime_min > 0) and (
+                time.time() - started_at >= lifetime_min * 60
+            )
+            if not expired and (not timeout_min or timeout_min <= 0):
                 continue
 
-            shared_last_active = await terminal_last_active_at(
-                user_id, policy_id, context_id
-            )
-            if shared_last_active:
-                shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
-                if shared_wall > self._activity_wall.get(key, 0):
-                    self._activity_wall[key] = shared_wall
-                    self._activity[key] = now
+            idle_seconds = 0.0
+            if not expired:
+                shared_last_active = await terminal_last_active_at(
+                    user_id, policy_id, context_id
+                )
+                if shared_last_active:
+                    shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
+                    if shared_wall > self._activity_wall.get(key, 0):
+                        self._activity_wall[key] = shared_wall
+                        self._activity[key] = now
 
-            last_active = self._activity.get(key, now)
-            idle_seconds = now - last_active
+                last_active = self._activity.get(key, now)
+                idle_seconds = now - last_active
 
-            if idle_seconds >= timeout_min * 60:
+            if expired or idle_seconds >= timeout_min * 60:
                 log.info(
-                    "Reaping idle terminal %s (user=%s, policy=%s, context=%s, idle=%.0fs, timeout=%dm)",
+                    "Reaping terminal %s (user=%s, policy=%s, context=%s, idle=%.0fs, timeout=%sm, max_lifetime=%sm, expired=%s)",
                     info.get("instance_name", info.get("instance_id")),
                     user_id,
                     policy_id,
                     context_id,
                     idle_seconds,
                     timeout_min,
+                    lifetime_min,
+                    expired,
                 )
                 try:
                     await asyncio.wait_for(

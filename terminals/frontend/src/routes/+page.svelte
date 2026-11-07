@@ -231,6 +231,8 @@
 		}
 		const idle = Number(data.get('idle_timeout_minutes'));
 		if (Number.isFinite(idle) && idle > 0) body.idle_timeout_minutes = idle;
+		const lifetime = Number(data.get('max_lifetime_minutes'));
+		if (Number.isFinite(lifetime) && lifetime > 0) body.max_lifetime_minutes = lifetime;
 		if (data.get('restricted') === 'on') body.restricted = true;
 		const env = String(data.get('env') || '').trim();
 		if (env) body.env = JSON.parse(env);
@@ -517,6 +519,7 @@
 						<option value="shared-rwo">shared-rwo</option>
 					</select></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400">Idle timeout<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="idle_timeout_minutes" type="number" min="0" value={editingPolicy.data.idle_timeout_minutes || ''} placeholder="30" /></label>
+					<label class="block text-xs text-gray-600 dark:text-gray-400">Max lifetime<input class="mt-1 h-7 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="max_lifetime_minutes" type="number" min="0" value={editingPolicy.data.max_lifetime_minutes || ''} placeholder="480" /></label>
 					<label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400"><input class="h-4 w-4 rounded border-gray-300/50" name="restricted" type="checkbox" checked={!!editingPolicy.data.restricted} />Restricted Kubernetes/OpenShift</label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Env JSON<textarea class="mt-1 min-h-24 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="env" placeholder={envPlaceholder}>{editingPolicy.data.env ? JSON.stringify(editingPolicy.data.env, null, 2) : ''}</textarea></label>
 					<label class="block text-xs text-gray-600 dark:text-gray-400 sm:col-span-2">Pod security context JSON<textarea class="mt-1 min-h-20 w-full rounded-lg border border-gray-200/50 bg-gray-100 px-2 py-2 font-mono text-xs text-gray-700 outline-none focus:border-gray-400/60 dark:border-white/4 dark:bg-white/6 dark:text-gray-300 dark:focus:border-white/12" name="pod_security_context" placeholder={podSecurityPlaceholder}>{editingPolicy.data.pod_security_context ? JSON.stringify(editingPolicy.data.pod_security_context, null, 2) : ''}</textarea></label>

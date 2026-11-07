@@ -44,6 +44,7 @@ class PolicyData(BaseModel):
     storage: Optional[str] = None
     storage_mode: Optional[str] = None
     idle_timeout_minutes: Optional[int] = None
+    max_lifetime_minutes: Optional[int] = None
     restricted: Optional[bool] = None
     pod_security_context: Optional[dict[str, Any]] = None
     container_security_context: Optional[dict[str, Any]] = None

@@ -140,6 +140,7 @@ curl -fsS http://localhost:3000/p/data-science/execute \
 | `storage` | Storage size, such as `"5Gi"`; behavior depends on the backend below |
 | `storage_mode` | Direct Kubernetes: `per-user`, `shared`, or `shared-rwo` |
 | `idle_timeout_minutes` | Stop terminals after this many idle minutes; `0` disables idle cleanup |
+| `max_lifetime_minutes` | Stop terminals this many minutes after they start, even while in use; `0` disables the limit |
 | `restricted` | Restricted Kubernetes/OpenShift defaults |
 | `pod_security_context`, `container_security_context` | Kubernetes security context overrides |
 | `podTemplate` | Kubernetes pod overrides, including volumes, scheduling, and health probes |
@@ -203,7 +204,7 @@ Schedules support one-time ISO datetimes, `@weekly`, `@monthly`, and five-field 
 
 ## Storage and persistence
 
-Stopping or reaping a terminal preserves its persisted files. Idle cleanup is disabled by default; enable it with `TERMINALS_IDLE_TIMEOUT_MINUTES` or a policy. File resets and user-data deletion are separate, destructive actions.
+Stopping or reaping a terminal preserves its persisted files. Idle cleanup is disabled by default; enable it with `TERMINALS_IDLE_TIMEOUT_MINUTES` or a policy. A maximum lifetime, set with `TERMINALS_MAX_LIFETIME_MINUTES` or a policy, stops terminals after a fixed time even while they are in use; the next request starts a fresh one with the same files. File resets and user-data deletion are separate, destructive actions.
 
 | Backend | Persisted terminal files |
 |---------|-------------------------|
@@ -313,6 +314,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_MAX_STORAGE` | | Storage cap. Kubernetes enforces this with PVC sizes; Docker support depends on the storage driver and does not quota the bind-mounted `/home/user`. |
 | `TERMINALS_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `TERMINALS_IDLE_TIMEOUT_MINUTES` | `0` | Minutes of inactivity before terminals are torn down. `0` disables idle cleanup. |
+| `TERMINALS_MAX_LIFETIME_MINUTES` | `0` | Minutes after start before terminals are torn down, even while in use. `0` disables the limit. |
 | `TERMINALS_IDLE_CLEANUP_TIMEOUT_SECONDS` | `120` | Timeout for each teardown/reset call during idle cleanup |
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:////app/data/terminals.db` in the image | SQLAlchemy database URL. Source installs use `data/terminals.db` next to the package directory. PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |

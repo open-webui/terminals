@@ -11,7 +11,7 @@ from typing import Optional
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
-from terminals.backends.base import Backend
+from terminals.backends.base import Backend, parse_started_at
 from terminals.config import settings
 from terminals.utils.network_profiles import resolve_network_profile
 from terminals.utils.context import (
@@ -812,6 +812,7 @@ class KubernetesBackend(Backend):
                 "api_key": api_key,
                 "host": host,
                 "port": 8000,
+                "started_at": parse_started_at(pod.status.start_time),
             }
             self._specs[key] = adopted_specs[policy_id]
             await self._seed_adopted_activity(key, user_id, policy_id, context_id)
