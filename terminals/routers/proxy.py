@@ -125,16 +125,33 @@ class InstanceInfo:
     api_key: str
 
 
+async def _touch_activity(backend, user_id: str, policy_id: str, context_id: str) -> None:
+    """Record terminal use; backends throttle the persisted write."""
+    try:
+        await backend.touch_activity(user_id, policy_id=policy_id, context_id=context_id)
+    except Exception:
+        logger.debug("touch_activity failed for user {}", user_id)
+
+
 async def _resolve_instance(
     request,
     user_id: str,
     policy_id: str = "default",
     context_id: str = DEFAULT_CONTEXT_ID,
     spec: Optional[dict] = None,
+    existing_only: bool = False,
 ) -> InstanceInfo:
     """Return a running instance, auto-provisioning if needed."""
     backend = request.app.state.backend
     try:
+        if existing_only:
+            info = await backend.get_terminal_info(user_id, policy_id=policy_id, context_id=context_id)
+            if info is None:
+                raise HTTPException(status_code=409, detail="Terminal instance is not running")
+            return InstanceInfo(
+                instance_id=info["instance_id"], host=info["host"],
+                port=info["port"], api_key=info["api_key"],
+            )
         info = await backend.ensure_terminal(
             user_id, policy_id=policy_id, context_id=context_id, spec=spec
         )
@@ -142,10 +159,7 @@ async def _resolve_instance(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if info is None:
         raise RuntimeError(f"Failed to provision terminal for user {user_id}")
-    try:
-        await backend.touch_activity(user_id, policy_id=policy_id, context_id=context_id)
-    except Exception:
-        logger.debug("touch_activity failed for user {}", user_id)
+    await _touch_activity(backend, user_id, policy_id, context_id)
     return InstanceInfo(
         instance_id=info["instance_id"],
         host=info["host"],
@@ -171,8 +185,11 @@ async def _proxy_request(
     Streams both the request body (upload) and response body (download)
     to avoid buffering large payloads in memory.
     """
+    # Inspecting machine health must never provision, wake, or keep an instance alive.
+    existing_only = path.rstrip("/") == "system/info"
     instance = await _resolve_instance(
         request, user_id, policy_id=policy_id, context_id=context_id, spec=spec,
+        existing_only=existing_only,
     )
 
     target_url = f"http://{instance.host}:{instance.port}/{path}"
@@ -204,7 +221,7 @@ async def _proxy_request(
     client = await _get_proxy_client(instance.host, instance.port)
 
     # Retry on connection errors — the container may still be starting.
-    max_retries = 1 if stream_body else 5
+    max_retries = 1 if stream_body or existing_only else 5
     for attempt in range(max_retries):
         try:
             content = request.stream() if stream_body else body
@@ -682,13 +699,18 @@ async def _ws_proxy(
                     "chat_id": ws.headers.get("x-session-id", ""),
                 }))
 
+            backend = ws.app.state.backend
+
+            # Long-lived sockets count as activity for as long as frames flow,
+            # so the idle reaper doesn't tear down a terminal in use.
             async def _client_to_upstream():
                 try:
                     while True:
                         msg = await ws.receive()
                         if msg["type"] == "websocket.disconnect":
                             break
-                        elif "bytes" in msg and msg["bytes"]:
+                        await _touch_activity(backend, user_id, policy_id, context_id)
+                        if "bytes" in msg and msg["bytes"]:
                             await upstream.send(msg["bytes"])
                         elif "text" in msg and msg["text"]:
                             await upstream.send(msg["text"])
@@ -698,6 +720,7 @@ async def _ws_proxy(
             async def _upstream_to_client():
                 try:
                     async for message in upstream:
+                        await _touch_activity(backend, user_id, policy_id, context_id)
                         if isinstance(message, bytes):
                             await ws.send_bytes(message)
                         else:
