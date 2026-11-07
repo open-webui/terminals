@@ -7,7 +7,7 @@ Open WebUI → Terminals → Open Terminal containers
 ```
 
 > [!IMPORTANT]
-> Production use requires an [Open WebUI Enterprise License](LICENSE) with Terminals access.
+> Commercial or organizational production use requires an [Open WebUI Enterprise License](LICENSE) with Terminals access.
 
 [Quick start](#quick-start) · [Admin UI](#admin-ui) · [Policies](#policies) · [Storage](#storage-and-persistence) · [Kubernetes](#kubernetes-deployment) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
 
@@ -481,4 +481,4 @@ Docker must be available when using the default backend. The command prints the 
 
 ## License
 
-[Open WebUI Enterprise License](LICENSE)
+Free for personal, non-commercial use. Commercial or organizational production use requires an Open WebUI Enterprise License. All rights reserved. See [LICENSE](LICENSE).
