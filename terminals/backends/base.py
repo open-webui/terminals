@@ -201,8 +201,16 @@ class Backend(ABC):
                 self._record_activity(key)
             return result
 
-    async def get_terminal_info(self, user_id: str) -> Optional[dict]:
-        """Look up an existing terminal without creating one."""
+    async def get_terminal_info(
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> Optional[dict]:
+        """Look up a running terminal without starting it or recording activity."""
+        info = self._instances.get(self._key(user_id, policy_id, context_id))
+        if info and await self.status(info["instance_id"]) == "running":
+            return info
         return None
 
     async def touch_activity(

@@ -957,9 +957,14 @@ class KubernetesOperatorBackend(Backend):
 
             return None
 
-    async def get_terminal_info(self, user_id: str) -> Optional[dict]:
+    async def get_terminal_info(
+        self,
+        user_id: str,
+        policy_id: str = "default",
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> Optional[dict]:
         """Look up an existing terminal from the K8s CRD without creating one."""
-        cr = await self._get_terminal_cr(user_id)
+        cr = await self._get_terminal_cr(user_id, policy_id, context_id)
         if cr is None:
             return None
 
@@ -996,11 +1001,7 @@ class KubernetesOperatorBackend(Backend):
         if synced is None or time.monotonic() - synced >= interval:
             await mark_terminal_active(user_id, policy_id, context_id)
             self._activity_synced_at[key] = time.monotonic()
-        if (
-            settings.status_cache_ttl > 0
-            and checked is not None
-            and time.monotonic() - checked < settings.status_cache_ttl
-        ):
+        if checked is not None and time.monotonic() - checked < interval:
             return
 
         api_client = await self._ensure_client()
