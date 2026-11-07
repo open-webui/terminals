@@ -550,6 +550,7 @@ async def _validate_ws_auth(
             await ws.close(code=4001, reason="Expected auth message")
             return None
         token = payload.get("token", "")
+        ws.state.auth = payload
     except (asyncio.TimeoutError, json.JSONDecodeError):
         await ws.close(code=4001, reason="Auth timeout or invalid payload")
         return None
@@ -568,6 +569,7 @@ async def _validate_ws_auth(
         await ws.close(code=4001, reason="Invalid API key")
         return None
 
+    user_id = ws.headers.get("x-user-id") or user_id
     if not user_id:
         await ws.close(code=4002, reason="Missing user_id")
         return None
@@ -639,7 +641,9 @@ async def _ws_proxy(
         try:
             upstream = await websockets.connect(
                 upstream_url,
+                additional_headers={"X-Session-Id": ws.headers.get("x-session-id", "")},
                 compression="deflate" if settings.ws_compression else None,
+                max_size=20 * 1024 * 1024,
             )
             break
         except (
@@ -673,7 +677,7 @@ async def _ws_proxy(
             # Browser views authenticate upstream with the capability in the URL.
             if not path.startswith("browser/view/"):
                 await upstream.send(json.dumps({
-                    "type": "auth",
+                    **ws.state.auth,
                     "token": instance.api_key,
                     "chat_id": ws.headers.get("x-session-id", ""),
                 }))
@@ -701,11 +705,16 @@ async def _ws_proxy(
                 except Exception as e:
                     logger.debug("upstream→client closed: {}", e)
 
-            await asyncio.gather(
-                _client_to_upstream(),
-                _upstream_to_client(),
-                return_exceptions=True,
-            )
+            tasks = [
+                asyncio.create_task(_client_to_upstream()),
+                asyncio.create_task(_upstream_to_client()),
+            ]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error("WebSocket terminal proxy error: {}", e)
 
