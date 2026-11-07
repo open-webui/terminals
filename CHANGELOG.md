@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-11-07
+
+### Fixed
+
+- Fixed opening or refreshing System info starting a terminal or preventing idle cleanup. It now inspects only an already-running terminal for the selected user, policy, and chat, and reports when that terminal is not running.
+- Fixed idle cleanup stopping terminals while users were typing, receiving command output, or using live browser and desktop views. Traffic in either direction now counts as activity.
+- Fixed live connections failing to recognize the user supplied by Open WebUI. Terminal and agent connections now also retain their chat identity and resume position when reconnecting.
+- Fixed live connections closing when a single incoming message exceeded 1 MiB. They now accept messages up to 20 MiB, including larger desktop frames.
+- Fixed connections remaining open after the browser disconnected or the Open Terminal stream ended. Both sides now close when either side finishes.
+
 ## [0.3.1] - 2026-11-05
 
 ### Fixed
