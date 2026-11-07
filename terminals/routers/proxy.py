@@ -702,14 +702,16 @@ async def _ws_proxy(
             backend = ws.app.state.backend
 
             # Long-lived sockets count as activity for as long as frames flow,
-            # so the idle reaper doesn't tear down a terminal in use.
+            # so the idle reaper doesn't tear down a terminal in use. Client
+            # keepalive pings don't count, or a forgotten tab would never idle.
             async def _client_to_upstream():
                 try:
                     while True:
                         msg = await ws.receive()
                         if msg["type"] == "websocket.disconnect":
                             break
-                        await _touch_activity(backend, user_id, policy_id, context_id)
+                        if msg.get("text") != '{"type":"ping"}':
+                            await _touch_activity(backend, user_id, policy_id, context_id)
                         if "bytes" in msg and msg["bytes"]:
                             await upstream.send(msg["bytes"])
                         elif "text" in msg and msg["text"]:
