@@ -108,7 +108,7 @@ The examples below use the same `$API_KEY` shell variable. In a new shell, set i
 The built-in UI at `/` has two sections:
 
 - **Templates:** create or edit instance configuration and scheduled resets, or delete a template and its environments.
-- **Environments:** inspect tracked environments, including stopped ones; restart, reset, or delete the selected environment.
+- **Environments:** inspect tracked environments, including stopped ones; start, stop, restart, reset, or delete the selected environment.
 
 Use the Terminals admin API key. Set `TERMINALS_ENABLE_UI=false` for an API-only deployment.
 
@@ -214,7 +214,7 @@ profile changes to existing terminals.
 
 ### Apply changes to existing terminals
 
-Edit configuration with `PATCH /api/v1/terminals/templates/{id}`. Changes take effect when an environment is next created. Restart stops the selected environment and preserves its files; its next use loads the current template configuration:
+Edit configuration with `PATCH /api/v1/terminals/templates/{id}`. Changes take effect when an environment next starts. Restart stops the selected environment, preserves its files, and starts it again with the current template configuration:
 
 ```bash
 curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates/data-science/restart \
@@ -223,7 +223,7 @@ curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates/data-science/
   -d '{"user_id":"demo-user"}'
 ```
 
-For chat or model scope, also supply `chat_id` or `model_id`. Restart does not create an unused environment. Scope and storage-mode changes are rejected while affected environments exist.
+For chat or model scope, also supply `chat_id` or `model_id`. Restart does not create an unused environment. Use `/stop` to stop it without starting it again, and `/start` to start it, creating it if needed. Scope and storage-mode changes are rejected while affected environments exist.
 
 ### Schedule file resets
 

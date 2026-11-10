@@ -189,6 +189,12 @@ async def describe_instance(backend, row):
 
 
 async def change_instance(backend, template_id, context_id, action):
+    """Stop, restart, reset, or delete one environment.
+
+    Restart stops the environment and starts it again on the current template, so a
+    new image or setup script takes effect right away. Stop leaves it stopped until
+    it is next used or started.
+    """
     from terminals.db.session import async_session
     from terminals.models.template import TemplateLifecycleState
     from terminals.utils.context import get_terminal_id
@@ -209,3 +215,6 @@ async def change_instance(backend, template_id, context_id, action):
                 await remove_home(backend, row, spec)
                 await session.delete(row)
                 await session.commit()
+    if action == "restart":
+        # Outside the locks: starting takes the same environment lock.
+        await backend.ensure_terminal(template_id=template_id, context_id=context_id)
