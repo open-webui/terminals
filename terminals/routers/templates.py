@@ -282,6 +282,24 @@ async def restart_instance(template_id: str, body: InstanceContext, request: Req
     return {"ok": True}
 
 
+@router.post("/{template_id}/stop")
+async def stop_environment(template_id: str, body: InstanceContext, request: Request):
+    context, _ = await context_for(template_id, body)
+    await change_instance(request.app.state.backend, template_id, context, "stop")
+    return {"ok": True}
+
+
+@router.post("/{template_id}/start")
+async def start_environment(template_id: str, body: InstanceContext, request: Request):
+    """Start an environment, creating it on first use like any other request would."""
+    context, _ = await context_for(template_id, body)
+    try:
+        await request.app.state.backend.ensure_terminal(template_id=template_id, context_id=context)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 @router.post("/{template_id}/reset")
 async def reset_instance(template_id: str, body: InstanceContext, request: Request):
     context, _ = await context_for(template_id, body)
