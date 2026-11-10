@@ -20,7 +20,7 @@ async def list_terminals(request: Request, template_id: str | None = None):
 async def status(request: Request):
     async with async_session() as session:
         count = await session.scalar(select(func.count()).select_from(Template))
-    return {"status": True, "version": "0.4.0", "backend": settings.backend,
+    return {"status": True, "version": "0.4.1", "backend": settings.backend,
             "template_count": count, "image": settings.image,
             "max_cpu": settings.max_cpu, "max_memory": settings.max_memory,
             "max_storage": settings.max_storage, "allowed_images": settings.allowed_images,
