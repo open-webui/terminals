@@ -2,9 +2,7 @@
 
 import asyncio
 import base64
-import hashlib
 import logging
-import re
 import secrets
 from typing import Optional
 
@@ -13,6 +11,8 @@ from kubernetes_asyncio.client import ApiClient
 
 from terminals.backends.base import Backend, parse_started_at
 from terminals.config import settings
+from terminals.utils.kubernetes_labels import template_label
+from terminals.utils.template_specs import resolve_template_spec
 from terminals.utils.network_profiles import resolve_network_profile
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
@@ -21,6 +21,7 @@ from terminals.utils.context import (
     DEFAULT_CONTEXT_ID,
     context_hash,
     normalize_context_id,
+    get_terminal_id,
 )
 from terminals.utils.env import build_terminal_env
 from terminals.utils.kubernetes_security import (
@@ -30,6 +31,7 @@ from terminals.utils.kubernetes_security import (
     restricted_enabled,
 )
 from terminals.utils.kubernetes_scheduling import node_selector, tolerations
+from terminals.utils.image_pull import pull_policy
 
 log = logging.getLogger(__name__)
 
@@ -37,26 +39,11 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_DNS_SAFE = re.compile(r"[^a-z0-9-]")
-_POLICY_ID_ANNOTATION = "openwebui.com/policy-id"
+_TEMPLATE_ID_ANNOTATION = "openwebui.com/template-id"
 
 
-def _sanitize_name(
-    user_id: str,
-    policy_id: str = "default",
-    context_id: str = DEFAULT_CONTEXT_ID,
-) -> str:
-    """Deterministic, DNS-safe K8s resource name (≤63 chars)."""
-    short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
-    context_id = normalize_context_id(context_id)
-    if policy_id == "default":
-        name = f"terminal-{short}"
-    else:
-        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-        name = f"terminal-{short}-{policy_slug}"
-    if context_id != DEFAULT_CONTEXT_ID:
-        name = f"{name}-{context_hash(context_id)}"
-    return name
+def _sanitize_name(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> str:
+    return f"terminal-{get_terminal_id(template_id, context_id)}"
 
 
 def _parse_labels() -> dict[str, str]:
@@ -72,67 +59,15 @@ def _parse_labels() -> dict[str, str]:
     return labels
 
 
-def _base_labels(user_id: str) -> dict[str, str]:
+def _base_labels(template_id: str, context_id: str) -> dict[str, str]:
     """Standard labels applied to every resource we create."""
     labels = {
         "app.kubernetes.io/managed-by": "terminals",
         "app.kubernetes.io/part-of": "open-terminal",
-        "openwebui.com/user-id": user_id,
+        "openwebui.com/instance": get_terminal_id(template_id, context_id),
     }
     labels.update(_parse_labels())
     return labels
-
-
-async def _list_user_data(core) -> list[str]:
-    pvcs = await core.list_namespaced_persistent_volume_claim(
-        settings.kubernetes_namespace, label_selector="app.kubernetes.io/managed-by=terminals"
-    )
-    return sorted({
-        pvc.metadata.labels["openwebui.com/user-id"] for pvc in pvcs.items
-        if (pvc.metadata.labels or {}).get("openwebui.com/user-id")
-    })
-
-
-async def _cleanup_user_pvcs(core, user_id: str) -> int:
-    ns = settings.kubernetes_namespace
-    pvcs = await core.list_namespaced_persistent_volume_claim(
-        ns, label_selector="app.kubernetes.io/managed-by=terminals"
-    )
-    if any(pvc.metadata.name == f"terminals-shared-{ns}" for pvc in pvcs.items):
-        raise RuntimeError("Shared PVC storage requires clearing the user's subdirectory separately")
-    claims = {
-        pvc.metadata.name: pvc for pvc in pvcs.items
-        if (pvc.metadata.labels or {}).get("openwebui.com/user-id") == user_id
-    }
-    for attempt in range(61):
-        pods = await core.list_namespaced_pod(ns)
-        matching = [
-            pod for pod in pods.items
-            if (pod.metadata.labels or {}).get("openwebui.com/user-id") == user_id or any(
-                volume.persistent_volume_claim
-                and volume.persistent_volume_claim.claim_name in claims
-                for volume in pod.spec.volumes or []
-            )
-        ]
-        if not matching:
-            break
-        if attempt == 60 or any(not pod.metadata.deletion_timestamp for pod in matching):
-            raise RuntimeError("Terminal pods still exist; user data has not been deleted. Remove them and retry.")
-        await asyncio.sleep(0.5)
-    deleted = 0
-    for name, pvc in claims.items():
-        try:
-            await core.delete_namespaced_persistent_volume_claim(
-                name, ns,
-                body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=pvc.metadata.uid)),
-            )
-        except client.exceptions.ApiException as exc:
-            if exc.status != 404:
-                raise
-            continue
-        deleted += 1
-        log.info("Requested workspace PVC deletion for user=%s namespace=%s name=%s", user_id, ns, name)
-    return deleted
 
 
 def _deep_merge(*items: dict | None) -> dict:
@@ -225,12 +160,11 @@ def _apply_pod_template(pod_manifest: dict, pod_template: dict | None) -> dict:
 
 
 class KubernetesBackend(Backend):
-    """Manage terminal instances as Kubernetes Pods + Services."""
+    """Manage terminal environments as Kubernetes Pods + Services."""
 
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
-        self._uid_cache: dict[str, str] = {}  # uid → pod name
 
     async def _ensure_client(self) -> ApiClient:
         if self._api_client is None:
@@ -249,8 +183,7 @@ class KubernetesBackend(Backend):
 
     async def provision(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
@@ -261,12 +194,12 @@ class KubernetesBackend(Backend):
 
         api_key = secrets.token_urlsafe(24)
         context_id = normalize_context_id(context_id)
-        name = _sanitize_name(user_id, policy_id, context_id)
-        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        name = _sanitize_name(template_id, context_id)
+        template_slug = template_label(template_id)
         ns = settings.kubernetes_namespace
-        labels = _base_labels(user_id)
+        labels = _base_labels(template_id, context_id)
         labels.update(profile.get("kubernetes_labels", {}))
-        labels["openwebui.com/policy"] = policy_slug
+        labels["openwebui.com/template"] = template_slug
         labels[CONTEXT_TYPE_LABEL] = (
             DEFAULT_CONTEXT_ID
             if context_id == DEFAULT_CONTEXT_ID
@@ -274,7 +207,7 @@ class KubernetesBackend(Backend):
         )
         labels[CONTEXT_HASH_LABEL] = context_hash(context_id)
         annotations = {
-            _POLICY_ID_ANNOTATION: policy_id,
+            _TEMPLATE_ID_ANNOTATION: template_id,
             CONTEXT_ID_ANNOTATION: context_id,
         }
 
@@ -321,11 +254,11 @@ class KubernetesBackend(Backend):
 
         # Egress filtering is handled inside the container (dnsmasq + ipset +
         # iptables + capsh) triggered by OPEN_TERMINAL_ALLOWED_DOMAINS env var.
-        has_egress_policy = "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env
+        has_egress_template = "OPEN_TERMINAL_ALLOWED_DOMAINS" in terminal_env
         restricted = restricted_enabled(s)
         pod_security = pod_security_context(s)
         container_security = container_security_context(s)
-        if not container_security and has_egress_policy and not restricted:
+        if not container_security and has_egress_template and not restricted:
             container_security = {
                 "capabilities": {
                     "add": ["NET_ADMIN"],
@@ -347,15 +280,11 @@ class KubernetesBackend(Backend):
         volume_mounts = []
         affinity = None
         shared_pvc_name = f"terminals-shared-{ns}"
-        shared_sub_path = (
-            user_id
-            if context_id == DEFAULT_CONTEXT_ID
-            else f"{user_id}/contexts/{context_hash(context_id)}"
-        )
+        shared_sub_path = f".terminals/{get_terminal_id(template_id, context_id)}"
 
         if storage_size:
             if storage_mode == "per-user":
-                # Each user gets their own PVC
+                # Legacy storage-mode spelling; each environment gets its own PVC.
                 pvc = client.V1PersistentVolumeClaim(
                     metadata=client.V1ObjectMeta(name=name, namespace=ns, labels=labels),
                     spec=client.V1PersistentVolumeClaimSpec(
@@ -439,6 +368,7 @@ class KubernetesBackend(Backend):
                     client.V1Container(
                         name="open-terminal",
                         image=image,
+                        image_pull_policy=pull_policy(image),
                         ports=[client.V1ContainerPort(container_port=8000)],
                         env=env_vars,
                         volume_mounts=volume_mounts or None,
@@ -467,19 +397,17 @@ class KubernetesBackend(Backend):
         )
 
         try:
-            created = await core.create_namespaced_pod(ns, pod)
-            log.info("Created Pod %s in %s (policy=%s, storage=%s)", name, ns, policy_id, storage_mode)
+            await core.create_namespaced_pod(ns, pod)
+            log.info("Created Pod %s in %s (template=%s, storage=%s)", name, ns, template_id, storage_mode)
         except client.exceptions.ApiException as exc:
             if exc.status == 409:
                 log.info("Pod %s already exists, replacing", name)
                 await core.delete_namespaced_pod(name, ns)
                 await self._wait_for_pod_deletion(core, name, ns)
-                created = await core.create_namespaced_pod(ns, pod)
+                await core.create_namespaced_pod(ns, pod)
             else:
                 raise
 
-        instance_id = created.metadata.uid
-        self._uid_cache[instance_id] = name
 
         # ---- Service -----------------------------------------------------
         svc = client.V1Service(
@@ -487,8 +415,8 @@ class KubernetesBackend(Backend):
             spec=client.V1ServiceSpec(
                 type=settings.kubernetes_service_type,
                 selector={
-                    "openwebui.com/user-id": user_id,
-                    "openwebui.com/policy": policy_slug,
+                    "openwebui.com/instance": get_terminal_id(template_id, context_id),
+                    "openwebui.com/template": template_slug,
                     CONTEXT_HASH_LABEL: context_hash(context_id),
                 },
                 ports=[
@@ -509,8 +437,7 @@ class KubernetesBackend(Backend):
         await self._wait_until_pod_ready(core, name, ns, timeout=60)
 
         return {
-            "instance_id": instance_id,
-            "instance_name": name,
+            "workload_name": name,
             "api_key": api_key,
             "host": host,
             "port": 8000,
@@ -539,61 +466,13 @@ class KubernetesBackend(Backend):
             await asyncio.sleep(1)
         log.warning("Pod %s did not become ready within %ds", name, timeout)
 
-    async def start(self, instance_id: str) -> bool:
-        current = await self.status(instance_id)
-        if current == "running":
-            return True
-        # Pods cannot be restarted. The caller should refresh the terminal.
-        return False
 
-    async def teardown(self, instance_id: str) -> None:
-        api_client = await self._ensure_client()
-        core = client.CoreV1Api(api_client)
-        ns = settings.kubernetes_namespace
-
-        # Find the pod by UID to get the name.
-        name = await self._name_from_uid(instance_id)
-        if name is None:
-            log.warning("No pod found for UID %s", instance_id)
-            return
-
-        # Delete Pod.
-        try:
-            await core.delete_namespaced_pod(name, ns)
-            log.info("Deleted Pod %s", name)
-        except client.exceptions.ApiException:
-            log.warning("Could not delete Pod %s (may already be gone)", name)
-
-        # Delete Service.
-        try:
-            await core.delete_namespaced_service(name, ns)
-            log.info("Deleted Service %s", name)
-        except client.exceptions.ApiException:
-            log.warning("Could not delete Service %s", name)
-        # Delete Secret.
-        secret_name = f"{name}-apikey"
-        try:
-            await core.delete_namespaced_secret(secret_name, ns)
-            log.info("Deleted Secret %s", secret_name)
-        except client.exceptions.ApiException:
-            log.warning("Could not delete Secret %s (may already be gone)", secret_name)
-        # Clean up UID cache.
-        self._uid_cache.pop(instance_id, None)
 
         # Note: PVC is intentionally kept for data persistence.
 
-    async def list_user_data(self) -> list[str]:
-        api_client = await self._ensure_client()
-        return await _list_user_data(client.CoreV1Api(api_client))
-
-    async def cleanup_user(self, user_id: str) -> int:
-        api_client = await self._ensure_client()
-        return await _cleanup_user_pvcs(client.CoreV1Api(api_client), user_id)
-
     async def reset(
         self,
-        user_id: str,
-        policy_id: str,
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> None:
@@ -607,18 +486,14 @@ class KubernetesBackend(Backend):
 
         storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
         context_id = normalize_context_id(context_id)
-        terminal_name = _sanitize_name(user_id, policy_id, context_id)
+        terminal_name = _sanitize_name(template_id, context_id)
         reset_name = f"{terminal_name[:57]}-reset"
         shared_pvc_name = f"terminals-shared-{ns}"
         claim_name = terminal_name
         sub_path = None
         if storage_mode in ("shared", "shared-rwo"):
             claim_name = shared_pvc_name
-            sub_path = (
-                user_id
-                if context_id == DEFAULT_CONTEXT_ID
-                else f"{user_id}/contexts/{context_hash(context_id)}"
-            )
+            sub_path = f".terminals/{get_terminal_id(template_id, context_id)}"
 
         try:
             await core.read_namespaced_persistent_volume_claim(claim_name, ns)
@@ -627,8 +502,8 @@ class KubernetesBackend(Backend):
                 return
             raise
 
-        labels = _base_labels(user_id)
-        labels["openwebui.com/policy"] = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        labels = _base_labels(template_id, context_id)
+        labels["openwebui.com/template"] = template_label(template_id)
         labels[CONTEXT_TYPE_LABEL] = (
             DEFAULT_CONTEXT_ID
             if context_id == DEFAULT_CONTEXT_ID
@@ -648,6 +523,7 @@ class KubernetesBackend(Backend):
             (item for item in template.get("containers", []) if item.get("name") == "open-terminal"),
             {},
         )
+        reset_image = s.get("image", settings.effective_kubernetes_image)
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
             spec=client.V1PodSpec(
@@ -659,7 +535,8 @@ class KubernetesBackend(Backend):
                 containers=[
                     client.V1Container(
                         name="reset",
-                        image=s.get("image", settings.effective_kubernetes_image),
+                        image=reset_image,
+                        image_pull_policy=pull_policy(reset_image),
                         security_context=deep_merge(
                             terminal_container.get("securityContext"), container_security_context(s)
                         ) or None,
@@ -710,14 +587,10 @@ class KubernetesBackend(Backend):
         except client.exceptions.ApiException:
             pass
 
-    async def status(self, instance_id: str) -> str:
+    async def status(self, name: str) -> str:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         ns = settings.kubernetes_namespace
-
-        name = await self._name_from_uid(instance_id)
-        if name is None:
-            return "missing"
 
         try:
             pod = await core.read_namespaced_pod(name, ns)
@@ -735,7 +608,9 @@ class KubernetesBackend(Backend):
                 # Still pulling or initializing — treat as starting.
                 return "running"
             return "stopped"
-        except client.exceptions.ApiException:
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
             return "missing"
 
     async def close(self) -> None:
@@ -751,8 +626,8 @@ class KubernetesBackend(Backend):
         """Scan running K8s pods and repopulate ``_instances``.
 
         Called during startup to recover state after a restart.
-        Reads user_id and policy from pod labels, and the API key
-        from the pod's env vars.
+        Reads full template/context identifiers from annotations and the API key
+        from the companion Secret.
         """
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
@@ -772,20 +647,18 @@ class KubernetesBackend(Backend):
             if pod.status.phase not in ("Running", "Pending"):
                 continue
 
-            labels = pod.metadata.labels or {}
             annotations = pod.metadata.annotations or {}
-            user_id = labels.get("openwebui.com/user-id")
-            policy_slug = labels.get("openwebui.com/policy", "default")
-            policy_id = annotations.get(_POLICY_ID_ANNOTATION, policy_slug)
-            context_id = normalize_context_id(annotations.get(CONTEXT_ID_ANNOTATION))
-            if not user_id:
+            template_id = annotations.get(_TEMPLATE_ID_ANNOTATION)
+            context_id = annotations.get(CONTEXT_ID_ANNOTATION)
+            if not template_id or not context_id:
+                log.warning("Skipping pod %s without template/context metadata", pod.metadata.name)
+                continue
+            if pod.metadata.name != _sanitize_name(template_id, context_id):
                 continue
 
-            uid = pod.metadata.uid
             name = pod.metadata.name
-            self._uid_cache[uid] = name
 
-            key = self._key(user_id, policy_id, context_id)
+            key = self._key(template_id, context_id)
             if key in self._instances:
                 continue
 
@@ -804,18 +677,17 @@ class KubernetesBackend(Backend):
                 continue
 
             host = f"{name}.{ns}.svc.cluster.local"
-            if policy_id not in adopted_specs:
-                adopted_specs[policy_id] = await self._adopted_spec(policy_id)
+            if template_id not in adopted_specs:
+                adopted_specs[template_id] = await resolve_template_spec(template_id)
             self._instances[key] = {
-                "instance_id": uid,
-                "instance_name": name,
+                "workload_name": name,
                 "api_key": api_key,
                 "host": host,
                 "port": 8000,
                 "started_at": parse_started_at(pod.status.start_time),
             }
-            self._specs[key] = adopted_specs[policy_id]
-            await self._seed_adopted_activity(key, user_id, policy_id, context_id)
+            self._specs[key] = adopted_specs[template_id]
+            self._instances[key].update(template_id=template_id, context_id=context_id)
             recovered += 1
 
         if recovered:
@@ -824,27 +696,6 @@ class KubernetesBackend(Backend):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _name_from_uid(self, uid: str) -> Optional[str]:
-        """Look up a Pod name by its UID (cached)."""
-        if uid in self._uid_cache:
-            return self._uid_cache[uid]
-
-        api_client = await self._ensure_client()
-        core = client.CoreV1Api(api_client)
-        ns = settings.kubernetes_namespace
-
-        try:
-            pods = await core.list_namespaced_pod(
-                ns, label_selector="app.kubernetes.io/managed-by=terminals"
-            )
-            for pod in pods.items:
-                self._uid_cache[pod.metadata.uid] = pod.metadata.name
-                if pod.metadata.uid == uid:
-                    return pod.metadata.name
-        except client.exceptions.ApiException:
-            pass
-        return None
 
     async def _wait_for_pod_deletion(
         self, core: client.CoreV1Api, name: str, ns: str, timeout: int = 30,

@@ -1,4 +1,4 @@
-"""Environment helpers for Open Terminal instances."""
+"""Environment helpers for Open Terminal environments."""
 
 import os
 from collections.abc import Mapping
@@ -18,7 +18,7 @@ def _format_cpu_count(value: str) -> str:
 
 
 def build_terminal_env(
-    policy_env: Mapping[str, Any] | None = None,
+    template_env: Mapping[str, Any] | None = None,
     *,
     cpu_limit: str | None = None,
     memory_limit: str | None = None,
@@ -31,7 +31,7 @@ def build_terminal_env(
         if value:
             env[key] = value
 
-    for key, value in (policy_env or {}).items():
+    for key, value in (template_env or {}).items():
         key = str(key)
         if key in _RESERVED_CONTAINER_ENV or value is None:
             continue

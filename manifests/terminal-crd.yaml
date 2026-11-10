@@ -27,22 +27,29 @@ spec:
             spec:
               type: object
               required:
-                - userId
+                - templateId
               properties:
-                userId:
+                templateId:
                   type: string
                   description: Open WebUI user ID that owns this terminal.
                 contextId:
                   type: string
                   default: "default"
                   description: >-
-                    Optional runtime context for separate terminal instances.
+                    Optional runtime context for separate terminal environments.
                     v1 supports "default", "chat:<chat_id>", and
                     "automation:<automation_id>".
                 image:
                   type: string
                   default: "ghcr.io/open-webui/open-terminal:latest"
-                  description: Container image for the Open Terminal instance.
+                  description: Container image for the Open Terminal environment.
+                imagePullPolicy:
+                  type: string
+                  enum: ["Always", "IfNotPresent", "Never"]
+                  description: >-
+                    Pull policy for the image. When omitted, Kubernetes pulls
+                    :latest and untagged images on every start and other tags
+                    only when missing.
                 podTemplate:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
@@ -169,9 +176,9 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: User
+        - name: Template
           type: string
-          jsonPath: .spec.userId
+          jsonPath: .spec.templateId
         - name: Phase
           type: string
           jsonPath: .status.phase

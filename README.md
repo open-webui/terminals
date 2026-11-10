@@ -1,6 +1,6 @@
 # Terminals
 
-Give each Open WebUI user their own [Open Terminal](https://github.com/open-webui/open-terminal) container. Terminals starts containers on demand, routes requests to the right user, and manages policies, persistent files, and idle cleanup on Docker or Kubernetes.
+Run [Open Terminal](https://github.com/open-webui/open-terminal) environments from shared templates. Terminals starts containers on demand, routes requests by template and scope, and manages persistent files and idle cleanup on Docker or Kubernetes.
 
 ```text
 Open WebUI → Terminals → Open Terminal containers
@@ -9,11 +9,11 @@ Open WebUI → Terminals → Open Terminal containers
 > [!IMPORTANT]
 > Commercial or organizational production use requires an [Open WebUI Enterprise License](LICENSE) with Terminals access.
 
-[Quick start](#quick-start) · [Admin UI](#admin-ui) · [Policies](#policies) · [Storage](#storage-and-persistence) · [Kubernetes](#kubernetes-deployment) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Admin UI](#admin-ui) · [Templates](#templates) · [Storage](#storage-and-persistence) · [Kubernetes](#kubernetes-deployment) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
 
 ## Quick start
 
-You need Docker running and an existing Open WebUI instance. These commands use a macOS/Linux shell or WSL, with `openssl` available to generate a key. No repository clone or separate database is needed.
+You need Docker running and an existing Open WebUI deployment. These commands use a macOS/Linux shell or WSL, with `openssl` available to generate a key. No repository clone or separate database is needed.
 
 ### 1. Start Terminals
 
@@ -46,7 +46,7 @@ The service and the terminal containers use the same Docker network, so no host 
 
 ### 2. Open the admin UI
 
-Open **[http://localhost:3000](http://localhost:3000)**, paste the key into **Admin key**, and click **Refresh**. An empty Active terminals list is expected until someone uses a terminal.
+Open **[http://localhost:3000](http://localhost:3000)**, paste the key into **Admin key**, and click **Refresh**. An empty Environments list is expected until someone uses a template.
 
 Check that the service is running:
 
@@ -74,19 +74,27 @@ In Open WebUI, open **Settings → Admin → Integrations → Open Terminal** an
 
 If Open WebUI runs directly on the same host, use `http://localhost:3000` instead. The URL must be reachable from the Open WebUI server. The quick start binds the admin port to localhost; for remote access, expose it through your usual authenticated HTTPS deployment.
 
-Verify the connection and save it. In a chat, select it from the terminal menu. Terminals creates the user's container on first use; the first request can take longer while its image is downloaded.
+Verify the connection and save it. In the terminal menu, choose **New terminal**, enter a name, choose a scope, and save. Select that template to use it. Terminals creates its environment on first use; the first request can take longer while its image is downloaded.
 
 See the [Open WebUI connection guide](https://docs.openwebui.com/features/open-terminal/setup/connecting/) for the full UI walkthrough.
 
 <details>
 <summary>Try a terminal directly with curl</summary>
 
-This creates a terminal for the example user `demo-user`:
+Create a user-scoped template, then execute as the example user `demo-user`:
+
+```bash
+curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo","data":{"name":"My workspace","scope":"user"}}'
+```
 
 ```bash
 curl -fsS http://localhost:3000/execute \
   -H "Authorization: Bearer $API_KEY" \
   -H "X-User-Id: demo-user" \
+  -H "X-Terminal-Template-Id: demo" \
   -H "Content-Type: application/json" \
   -d '{"command":"echo hello"}'
 ```
@@ -97,42 +105,70 @@ The examples below use the same `$API_KEY` shell variable. In a new shell, set i
 
 ## Admin UI
 
-The built-in UI at `/` has three sections:
+The built-in UI at `/` has two sections:
 
-- **Active terminals:** inspect user terminals and stop individual instances. Stopping a terminal keeps its persisted files; the next access starts it again.
-- **User data:** discover persisted files, including users with no active terminals. **Delete user data** confirms, stops the user's tracked terminals, then deletes their files across policies and contexts. If terminals remain, files are preserved.
-- **Policies:** create or edit terminal settings, configure scheduled resets, and roll out changes to idle terminals.
+- **Templates:** create or edit instance configuration and scheduled resets, or delete a template and its environments.
+- **Environments:** inspect tracked environments, including stopped ones; restart, reset, or delete the selected environment.
 
 Use the Terminals admin API key. Set `TERMINALS_ENABLE_UI=false` for an API-only deployment.
 
-## Policies
+## Templates in Open WebUI
 
-A policy defines a terminal's image, environment variables, and resource limits. The default proxy routes work without creating a policy. Add policies in the admin UI or through the API when you need different environments:
+Connect a Terminals server using its server key. In the terminal picker, choose **New terminal**, enter a name and instance configuration, and choose one scope:
+
+| Scope | Environment |
+|-------|-------------|
+| None (`null`) | One environment for everyone authorized to use the template |
+| User (`"user"`) | One environment per user |
+| Chat (`"chat"`) | One environment per saved chat, shared by its authorized collaborators |
+| Model (`"model"`) | One environment per selected WebUI model or preset |
+
+Missing required context is an error. Creating two independent terminals creates two templates. Renaming a template does not change its environment identity or files.
+
+Open WebUI stores access grants per template. **Use** permits commands and file changes; **Manage** also permits configuration, sharing, and environment management. New templates are private to their creator. Parent connection access remains required. Snapshot-only chat sharing grants no execution access.
+
+Templates are managed at `/api/v1/terminals/templates`. Execution uses the existing proxy with `X-Terminal-Template-Id` and verified user, chat, or model headers from WebUI. Managed requests require `TERMINALS_API_KEY`; Terminals does not call WebUI to authorize them.
+
+Persistent homes live under `.terminals/<terminal-id>` on Docker and shared Kubernetes storage; dedicated Kubernetes storage uses a separate PVC. The terminal ID is derived from the template and scope context. Restart preserves files. Reset clears only the selected environment's files. Deleting a template removes its environments and files.
+
+For existing deployments, see the [0.4.0 upgrade requirements](CHANGELOG.md#moving-to-040-manually). Existing populated deployments use the documented manual migration to a new database and separate storage; `terminals db upgrade` does not convert them.
+
+## Templates
+
+A template defines the terminal's scope, image, environment variables, and resource limits. Create one in the admin UI or through the API; fresh installations do not create a default template automatically.
 
 ```bash
-curl -fsS -X PUT http://localhost:3000/api/v1/policies/data-science \
+curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "image": "ghcr.io/open-webui/open-terminal:latest",
-    "cpu_limit": "2",
-    "memory_limit": "4Gi",
-    "idle_timeout_minutes": 30
+    "id": "data-science",
+    "data": {
+      "name": "Data science",
+      "scope": "user",
+      "image": "ghcr.io/open-webui/open-terminal:latest",
+      "cpu_limit": "2",
+      "memory_limit": "4Gi",
+      "idle_timeout_minutes": 30
+    }
   }'
 ```
 
-Use `/p/{policy_id}/` to route a request through that policy:
+Select the template in the execution headers:
 
 ```bash
-curl -fsS http://localhost:3000/p/data-science/execute \
+curl -fsS http://localhost:3000/execute \
   -H "Authorization: Bearer $API_KEY" \
   -H "X-User-Id: demo-user" \
+  -H "X-Terminal-Template-Id: data-science" \
   -H "Content-Type: application/json" \
   -d '{"command":"echo hello"}'
 ```
 
 | Field | Purpose |
 |-------|---------|
+| `name` | Display name; changing it preserves instance identity |
+| `scope` | `null`, `"user"`, `"chat"`, or `"model"` |
 | `image` | Open Terminal image to run |
 | `env` | Environment variables passed to the terminal |
 | `network_profile` | Optional name from `TERMINALS_NETWORK_PROFILES`; omitted uses existing networking defaults |
@@ -145,12 +181,12 @@ curl -fsS http://localhost:3000/p/data-science/execute \
 | `pod_security_context`, `container_security_context` | Kubernetes security context overrides |
 | `podTemplate` | Kubernetes pod overrides, including volumes, scheduling, and health probes |
 
-Service limits such as `TERMINALS_MAX_CPU`, `TERMINALS_MAX_MEMORY`, and `TERMINALS_ALLOWED_IMAGES` constrain policy settings.
+Service limits such as `TERMINALS_MAX_CPU`, `TERMINALS_MAX_MEMORY`, and `TERMINALS_ALLOWED_IMAGES` constrain template settings.
 
 ### Network profiles
 
 Define named profiles in the orchestrator's environment, then select one with
-`"network_profile": "restricted"` in a policy or the admin policy editor:
+`"network_profile": "restricted"` in a template or the admin template editor:
 
 ```bash
 TERMINALS_NETWORK_PROFILES='{"restricted":{"docker_network":"terminals-restricted","kubernetes_labels":{"network-tier":"restricted"}}}'
@@ -173,44 +209,44 @@ Profiles select configuration; they do not create networks, firewall rules, or
 NetworkPolicies. Configure Docker firewall rules or Kubernetes NetworkPolicies
 and a CNI that enforces them to provide the intended access restrictions. A name
 such as `restricted` alone does not enforce isolation. Allow the orchestrator to
-reach terminal port 8000 and permit DNS if needed. Use the rollout below to apply
+reach terminal port 8000 and permit DNS if needed. Use the restart operation below to apply
 profile changes to existing terminals.
 
 ### Apply changes to existing terminals
 
-Changes take effect when a terminal is next provisioned. Use the policy's rollout action in the UI, or:
+Edit configuration with `PATCH /api/v1/terminals/templates/{id}`. Changes take effect when an environment is next created. Restart stops the selected environment and preserves its files; its next use loads the current template configuration:
 
 ```bash
-curl -fsS -X POST http://localhost:3000/api/v1/terminals/refresh \
+curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates/data-science/restart \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"policy_id":"data-science","only_idle":true}'
+  -d '{"user_id":"demo-user"}'
 ```
 
-`only_idle` defaults to `true`. Set it to `false` to stop active terminals too. Add `user_id` or `context_id` to narrow the selection. Files are preserved unless you explicitly set `reset:true`.
+For chat or model scope, also supply `chat_id` or `model_id`. Restart does not create an unused environment. Scope and storage-mode changes are rejected while affected environments exist.
 
 ### Schedule file resets
 
-Scheduled resets delete persisted terminal files and refresh matching terminals, including active ones. Configure them in the policy editor or with:
+Scheduled resets delete persisted terminal files and refresh matching terminals, including active ones. Configure them in the template editor or with:
 
 ```bash
-curl -fsS -X PUT http://localhost:3000/api/v1/policies/data-science/lifecycle \
+curl -fsS -X PUT http://localhost:3000/api/v1/terminals/templates/data-science/lifecycle \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"reset":{"schedule":"@weekly","timezone":"UTC"}}'
 ```
 
-Schedules support one-time ISO datetimes, `@weekly`, `@monthly`, and five-field cron expressions. Docker clears the matching home directory. Kubernetes uses a reset pod to clear the matching PVC or user subdirectory.
+Schedules support one-time ISO datetimes, `@weekly`, `@monthly`, and five-field cron expressions. Docker clears the matching home directory. Kubernetes uses a reset pod to clear the matching PVC or environment subdirectory.
 
 ## Storage and persistence
 
-Stopping or reaping a terminal preserves its persisted files. Idle cleanup is disabled by default; enable it with `TERMINALS_IDLE_TIMEOUT_MINUTES` or a policy. A maximum lifetime, set with `TERMINALS_MAX_LIFETIME_MINUTES` or a policy, stops terminals after a fixed time even while they are in use; the next request starts a fresh one with the same files. File resets and user-data deletion are separate, destructive actions.
+Stopping or reaping a terminal preserves its persisted files. Idle cleanup is disabled by default; enable it with `TERMINALS_IDLE_TIMEOUT_MINUTES` or a template. A maximum lifetime, set with `TERMINALS_MAX_LIFETIME_MINUTES` or a template, stops terminals after a fixed time even while they are in use; the next request starts a fresh one with the same files. File resets and environment deletion are separate, destructive actions.
 
 | Backend | Persisted terminal files |
 |---------|-------------------------|
-| Docker | Bind-mounted under `TERMINALS_DOCKER_DATA_DIR`, regardless of the policy's `storage` field |
+| Docker | Bind-mounted under `TERMINALS_DOCKER_DATA_DIR`, regardless of the template's `storage` field |
 | Kubernetes | PVCs; defaults to `1Gi` per terminal, with optional shared storage modes |
-| Kubernetes operator | Set `storage` in the policy to create a dedicated PVC; omitting it uses ephemeral storage |
+| Kubernetes operator | Dedicated PVCs; `storage` overrides the server default size |
 
 ### Docker paths
 
@@ -218,8 +254,8 @@ The quick start mounts the host's `./data` directory at `/app/data`:
 
 | Host path | Container path | Contents |
 |-----------|----------------|----------|
-| `./data/terminals.db` | `/app/data/terminals.db` | SQLite database: policies and lifecycle state |
-| `./data/terminals/` | `/app/data/terminals/` | Users' terminal files, including chat and automation contexts |
+| `./data/terminals.db` | `/app/data/terminals.db` | SQLite database: templates and lifecycle state |
+| `./data/terminals/` | `/app/data/terminals/` | Terminal homes under `.terminals/<terminal-id>` |
 
 `TERMINALS_DOCKER_HOST_DATA_DIR` tells the Docker daemon where those same terminal files live on its host. It is optional when the orchestrator and daemon use the same path. Both paths must refer to the same storage so provisioning, resets, and deletion operate on the same files. The quick start assumes a local Docker daemon.
 
@@ -231,22 +267,20 @@ On Kubernetes, `storage` sets the requested PVC size. On Docker it caps only the
 
 Terminal files need a filesystem. Open WebUI's uploaded-file storage and Azure Blob cleanup do not manage them. For Azure, use Azure Files, managed disks, or Kubernetes PVCs for terminal homes.
 
-### Delete a user's files
+### Delete an environment's files
 
-Deleting an account in Open WebUI does not notify Terminals. After revoking that user's access, use **User data → Delete user data** in the admin UI.
-
-For API-based cleanup, list users with `GET /api/v1/terminals/data`, stop their terminals through `/api/v1/terminals/refresh` with `user_id` and `only_idle:false`, then call:
+Deleting an Open WebUI account does not automatically delete terminal storage. Inspect a template's tracked instances with `GET /api/v1/terminals/templates/{id}/instances` (or all instances with `GET /api/v1/terminals`), then delete the specific template/context:
 
 ```bash
-curl -fsS -X POST http://localhost:3000/api/v1/terminals/cleanup \
+curl -fsS -X DELETE http://localhost:3000/api/v1/terminals/templates/data-science/instance \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"user_id":"deleted-user-id"}'
 ```
 
-Cleanup removes the user's Docker directory or requests deletion of their labeled per-user PVCs, clears lifecycle records, and logs each storage deletion. It works after idle terminals have been reaped. Repeating the call is safe. It waits for terminating Kubernetes resources and returns `409` if terminal resources remain; remove them before retrying.
+Use the context required by the template's scope. Chat- and model-scoped environments are shared; they do not belong to the first user who opened them. Deletion stops the workload before removing its storage and lifecycle record. Failed cleanup retains records so it can be retried. Selecting the same template/context later creates an empty environment.
 
-Shared PVCs need separate cleanup of the user's subdirectory and are not listed in the UI. The cleanup endpoint refuses deletion when shared storage exists. PVC removal follows the storage class's reclaim policy; retained volumes and backups need separate removal.
+Shared PVC deletion clears only the selected environment's subdirectory. Dedicated PVC deletion follows the storage class's reclaim policy; retained volumes and backups need separate removal.
 
 ## Kubernetes deployment
 
@@ -278,7 +312,7 @@ env:
         key: api-key
 ```
 
-Create the referenced Secret, mount persistent storage at `/app/data` for SQLite, and give the service account the backend's required Kubernetes permissions. The operator RBAC is in [operator-deployment.yaml](manifests/operator-deployment.yaml). Expose the Terminals service on port `3000` to Open WebUI. Add `"storage":"5Gi"` to operator policies that need persistent files.
+Create the referenced Secret, mount persistent storage at `/app/data` for SQLite, and give the service account the backend's required Kubernetes permissions. The operator RBAC is in [operator-deployment.yaml](manifests/operator-deployment.yaml). Expose the Terminals service on port `3000` to Open WebUI. Add `"storage":"5Gi"` to operator templates to request that PVC size.
 
 For direct Kubernetes provisioning, use `TERMINALS_BACKEND=kubernetes`; no operator or CRD is required. For restricted OpenShift clusters, follow [OpenShift deployment](docs/openshift.md).
 
@@ -286,11 +320,11 @@ For direct Kubernetes provisioning, use `TERMINALS_BACKEND=kubernetes`; no opera
 
 The quick start uses a static `TERMINALS_API_KEY` for both the admin UI and Open WebUI's Bearer connection. Keep it on trusted servers: API-key requests trust the supplied `X-User-Id` to select the user.
 
-For Open WebUI session authentication, set `TERMINALS_OPEN_WEBUI_URL` and use **Session** auth on the Open WebUI terminal connection. Terminals validates user tokens against that instance. Admin policy and lifecycle APIs still require a separate Terminals admin API key; user JWTs are not enough.
+Managed execution uses the server key. WebUI checks access and forwards verified context; user JWTs do not authorize managed template requests.
 
-Tool discovery at `/openapi.json` and `/p/{policy_id}/openapi.json` also accepts the Terminals admin API key in Session mode. Terminal operations still require a valid user token.
+Tool discovery at `/openapi.json` uses the server API key and the same verified template, user, and scope context as execution. It uses that instance; there is no separate discovery instance.
 
-`terminals serve` generates and prints a key if none is configured. That generated key changes when the service process restarts. Running the ASGI app directly without either authentication setting allows unauthenticated access and is intended only for local development.
+`terminals serve` generates and prints a key if none is configured. That generated key changes when the service process restarts. Configure a persistent API key for deployments; managed execution requires it even when running the ASGI app directly.
 
 ## Configuration
 
@@ -302,12 +336,13 @@ All settings are configured through environment variables prefixed with `TERMINA
 |----------|---------|-------------|
 | `TERMINALS_BACKEND` | `docker` | `docker`, `kubernetes`, or `kubernetes-operator` |
 | `TERMINALS_API_KEY` | *(auto-generated)* | Bearer token for API auth |
-| `TERMINALS_OPEN_WEBUI_URL` | | Advanced Open WebUI integration mode. If set, Terminals validates Open WebUI JWTs against that instance. Requires an Open WebUI terminal connection using session auth. |
 | `TERMINALS_HOST` | `0.0.0.0` | Orchestrator API bind host |
 | `TERMINALS_PORT` | `3000` | Orchestrator API bind port |
-| `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing per-user containers by deterministic name instead of replacing them. |
+| `TERMINALS_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing containers by deterministic name instead of replacing them. |
 | `TERMINALS_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
 | `TERMINALS_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default Open Terminal container image |
+| `TERMINALS_IMAGE_PULL_POLICY` | | `Always`, `IfNotPresent`, or `Never`, for every backend. Unset pulls images tagged `:latest` or untagged on every start and other tags only when missing, matching Kubernetes. |
+| `TERMINALS_IMAGE_PULL_INTERVAL_SECONDS` | `3600` | Docker only: how long a pulled image is used before `Always` checks the registry again. If the registry can't be reached, the local copy is used. |
 | `TERMINALS_NETWORK_PROFILES` | `{}` | JSON object mapping profile names to `docker_network` and/or `kubernetes_labels` configuration |
 | `TERMINALS_MAX_CPU` | | Hard cap on CPU per terminal container/pod |
 | `TERMINALS_MAX_MEMORY` | | Hard cap on memory per terminal container/pod |
@@ -319,7 +354,6 @@ All settings are configured through environment variables prefixed with `TERMINA
 | `TERMINALS_DATABASE_URL` | `sqlite+aiosqlite:////app/data/terminals.db` in the image | SQLAlchemy database URL. Source installs use `data/terminals.db` next to the package directory. PostgreSQL is optional. |
 | `TERMINALS_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
 | `TERMINALS_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. |
-| `TERMINALS_TOKEN_CACHE_TTL` | `60` | Seconds a successfully validated Open WebUI token is cached (JWT mode only). A revoked token stays usable for up to the TTL; `0` validates every request. |
 | `TERMINALS_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket terminal traffic. Leave off unless clients connect over slow links. |
 | `TERMINALS_ACCESS_LOG` | `false` | Log every HTTP request. Off by default because per-request logging is expensive at high request rates. |
 | `TERMINALS_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. |
@@ -345,7 +379,7 @@ All settings are configured through environment variables prefixed with `TERMINA
 |----------|---------|-------------|
 | `TERMINALS_KUBERNETES_NAMESPACE` | `terminals` | Namespace for terminal pods, services, PVCs, and CRDs |
 | `TERMINALS_KUBERNETES_STORAGE_CLASS` | | Storage class for terminal PVCs. Empty uses the cluster default. |
-| `TERMINALS_KUBERNETES_STORAGE_SIZE` | `1Gi` | Default PVC size for the direct `kubernetes` backend; operator policies must set `storage` for persistence |
+| `TERMINALS_KUBERNETES_STORAGE_SIZE` | `1Gi` | Default PVC size for the direct `kubernetes` backend; both Kubernetes backends use this default when template `storage` is omitted |
 | `TERMINALS_KUBERNETES_STORAGE_MODE` | `per-user` | Direct Kubernetes storage mode: `per-user`, `shared`, or `shared-rwo`; the operator creates dedicated PVCs |
 | `TERMINALS_KUBERNETES_SERVICE_TYPE` | `ClusterIP` | Service type for terminal services |
 | `TERMINALS_KUBERNETES_KUBECONFIG` | | Kubeconfig path. Empty uses in-cluster config. |
@@ -388,7 +422,7 @@ container path. `readOnly` defaults to `true`. Do not mount over `/home/user`;
 Open Terminal expects that directory to stay writable.
 
 Kubernetes deployments do not use `TERMINALS_DOCKER_MOUNTS`. Use the existing
-policy `podTemplate` field and native Kubernetes volumes instead:
+template `podTemplate` field and native Kubernetes volumes instead:
 
 ```json
 {
@@ -416,7 +450,7 @@ boundary if terminal containers are privileged or can access the Docker socket.
 ### Kubernetes health probes
 
 
-Both Kubernetes backends accept probe overrides in the policy's `podTemplate`.
+Both Kubernetes backends accept probe overrides in the template's `podTemplate`.
 Each supplied probe replaces the default, so include its check (such as
 `httpGet`) as well as timing settings. For slower hardware:
 
@@ -445,12 +479,12 @@ Each supplied probe replaces the default, so include its check (such as
   }
 ```
 
-Omitted probes keep their existing defaults. Refresh existing terminals to apply
-the updated policy on their next access.
+Omitted probes keep their existing defaults. Restart existing terminals to apply
+the updated template on their next access.
 
 ### Docker network scaling
 
-For larger Docker deployments, create multiple bridge networks and set `TERMINALS_DOCKER_NETWORK` to a comma-separated list. Terminals assigns each user/policy/context to a stable network. Attach the orchestrator container to every listed network so it can reach terminals by name.
+For larger Docker deployments, create multiple bridge networks and set `TERMINALS_DOCKER_NETWORK` to a comma-separated list. Terminals assigns each template/context to a stable network. Attach the orchestrator container to every listed network so it can reach terminals by name.
 
 ## Troubleshooting
 
@@ -460,8 +494,8 @@ For larger Docker deployments, create multiple bridge networks and set `TERMINAL
 | Open WebUI cannot connect | Use `http://terminals:3000` on the shared Docker network. Inside a container, `localhost` refers to that container. |
 | First terminal is slow or fails | Check `docker logs terminals`; the configured terminal image must be available or pullable. |
 | Files disappear after recreating the service | Check the `/app/data` bind mount and both Docker data paths. Keep the same host directory across recreations. |
-| Kubernetes terminal files disappear after idle cleanup | For the operator backend, set `storage` in the policy so files live on a PVC. |
-| User-data deletion returns `409` | Terminal resources still exist or shared storage needs separate handling. Check the returned error; files are not deleted while terminals remain. |
+| Kubernetes terminal files disappear after idle cleanup | Check that the environment PVC still exists and `/home/user` is mounted from it. |
+| Environment deletion returns `409` | The workload may still be stopping. Check the returned error and retry; files are not deleted while the workload remains. |
 | UI is unavailable in a source install | Build the frontend and ensure `TERMINALS_ENABLE_UI` is not `false`. |
 
 ## Development

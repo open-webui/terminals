@@ -15,7 +15,7 @@ from terminals.db.urls import sync_database_url
 
 # Import *all* models so Base.metadata is fully populated.
 from terminals.models.base import Base  # noqa: F401
-from terminals.models.policy import Policy, PolicyLifecycle, PolicyLifecycleState  # noqa: F401
+from terminals.models.template import Template, TemplateLifecycle, TemplateLifecycleState  # noqa: F401
 
 # Alembic Config object — gives access to alembic.ini values.
 config = context.config
@@ -73,12 +73,21 @@ def run_migrations_online() -> None:
     (via ``asyncio.to_thread``), so we use a plain sync engine here to
     avoid nested-event-loop issues with aiosqlite/asyncpg.
     """
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, event
 
     url = _sync_url(_get_url())
     _ensure_sqlite_dir(url)
 
     connectable = create_engine(url, poolclass=pool.NullPool)
+
+    if connectable.dialect.name == "sqlite":
+        @event.listens_for(connectable, "connect")
+        def explicit_transactions(dbapi_connection, _):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(connectable, "begin")
+        def begin(connection):
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
 
     with connectable.connect() as connection:
         do_run_migrations(connection)

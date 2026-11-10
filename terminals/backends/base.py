@@ -3,26 +3,25 @@
 import asyncio
 import logging
 import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from abc import ABC
 from datetime import datetime, timezone
-from typing import Optional
 
 from terminals.config import settings
-from terminals.utils.policy_lifecycle import (
+from terminals.utils.template_lifecycle import (
+    ensure_terminal_state,
     mark_reset_applied,
     mark_terminal_active,
     reset_due_for,
     terminal_last_active_at,
 )
-from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
-from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
+from terminals.utils.template_specs import resolve_template_spec
+from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id, get_terminal_id
 
 log = logging.getLogger(__name__)
 
 
 def parse_started_at(value) -> float:
-    """Epoch seconds for a runtime's ISO start time, or now if unknown."""
+    """Epoch seconds for a instance's ISO start time, or now if unknown."""
     if isinstance(value, datetime):
         return value.timestamp()
     try:
@@ -35,386 +34,110 @@ class ProvisioningError(RuntimeError):
     """Terminal provisioning failed with a reason suitable for the client."""
 
 
-@dataclass
-class RefreshResult:
-    matched: int = 0
-    refreshed: int = 0
-    reset: int = 0
-    skipped_active: int = 0
-
-
 class Backend(ABC):
-    """Lifecycle interface for provisioning and managing terminal instances.
+    """Backend caches use the same deterministic key as persistent lifecycle state."""
 
-    Includes an in-memory activity tracker and idle reaper that automatically
-    tears down terminals that haven't been accessed within the configured
-    timeout (``settings.idle_timeout_minutes`` or per-policy
-    ``idle_timeout_minutes``).
-    """
-
-    def __init__(self) -> None:
-        # key = (user_id, policy_id, context_id)
-        self._activity: dict[tuple[str, str, str], float] = {}
-        self._activity_wall: dict[tuple[str, str, str], float] = {}
-        self._instances: dict[tuple[str, str, str], dict] = {}
-        self._specs: dict[tuple[str, str, str], dict] = {}
-        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
-        self._running_checked_at: dict[tuple[str, str, str], float] = {}
-        self._activity_synced_at: dict[tuple[str, str, str], float] = {}
-        self._reaper_task: Optional[asyncio.Task] = None
-
-    # ------------------------------------------------------------------
-    # Abstract interface
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    async def provision(
-        self,
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-        spec: Optional[dict] = None,
-    ) -> dict:
-        """Create a new terminal instance for *user_id*.
-
-        *policy_id* scopes the environment shape. *context_id* optionally
-        scopes separate runtime copies of that policy.
-        *spec* is the resolved policy spec dict; if ``None``, the backend
-        uses ``settings.*`` defaults.
-
-        Returns a dict with at least:
-        ``instance_id``, ``instance_name``, ``api_key``, ``host``, ``port``.
-        """
-
-    @abstractmethod
-    async def start(self, instance_id: str) -> bool:
-        """Idempotent start — no-op if already running."""
-
-    @abstractmethod
-    async def teardown(self, instance_id: str) -> None:
-        """Stop and remove the instance."""
-
-    @abstractmethod
-    async def status(self, instance_id: str) -> str:
-        """Return ``'running'``, ``'stopped'``, or ``'missing'``."""
-
-    @abstractmethod
-    async def close(self) -> None:
-        """Release resources on shutdown."""
-
-    async def reset(
-        self,
-        user_id: str,
-        policy_id: str,
-        context_id: str = DEFAULT_CONTEXT_ID,
-        spec: Optional[dict] = None,
-    ) -> None:
-        """Delete persisted files for a user terminal."""
-        raise NotImplementedError("Reset is not supported by this backend")
-
-    async def list_user_data(self) -> list[str]:
-        """List users with persisted terminal files, including inactive users."""
-        raise NotImplementedError("Listing user data is not supported by this backend")
-
-    async def cleanup_user(self, user_id: str) -> int:
-        """Remove an inactive user's persisted workspace storage."""
-        raise NotImplementedError("User cleanup is not supported by this backend")
-
-    # ------------------------------------------------------------------
-    # Instance tracking
-    # ------------------------------------------------------------------
+    def __init__(self):
+        self._instances = {}
+        self._specs = {}
+        self._activity_synced_at = {}
+        self._running_checked_at = {}
+        self._reaper_task = None
 
     @staticmethod
-    def _key(
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> tuple[str, str, str]:
-        return (user_id, policy_id, normalize_context_id(context_id))
+    def _key(template_id, context_id=DEFAULT_CONTEXT_ID):
+        return get_terminal_id(template_id, context_id)
 
-    def _record_activity(self, key: tuple[str, str, str]) -> None:
-        self._activity[key] = time.monotonic()
-        self._activity_wall[key] = time.time()
 
-    def invalidate_status(
-        self,
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> None:
-        self._running_checked_at.pop(self._key(user_id, policy_id, context_id), None)
+    def invalidate_status(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+        self._running_checked_at.pop(self._key(template_id, context_id), None)
 
-    async def ensure_terminal(
-        self,
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-        spec: Optional[dict] = None,
-    ) -> Optional[dict]:
-        """Get-or-create a terminal for *user_id*.
+    def forget(self, key):
+        for cache in (self._instances, self._specs,
+                      self._activity_synced_at, self._running_checked_at):
+            cache.pop(key, None)
 
-        Returns a dict with ``api_key``, ``host``, ``port``, or ``None``.
-        Tracks the instance for idle reaping.
-
-        Uses a per-key lock so concurrent requests for the same user+policy
-        don't race to provision the same container.
-        """
+    async def ensure_terminal(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+        from terminals.utils.instances import instance_lock
         context_id = normalize_context_id(context_id)
-        key = self._key(user_id, policy_id, context_id)
+        key = self._key(template_id, context_id)
+        async with instance_lock("template:" + template_id, shared=True), instance_lock(key):
+            # Read under the template lock: edits/deletion cannot race allocation.
+            spec = await resolve_template_spec(template_id)
+            scope = (spec or {}).get("scope")
+            valid = context_id == "default" if scope is None else context_id.startswith(scope + ":")
+            if not valid:
+                from fastapi import HTTPException
+                raise HTTPException(409, "Template scope changed; reopen the terminal")
+            await ensure_terminal_state(template_id, context_id)
+            info = await self._ensure_terminal(template_id, context_id, spec)
+            if info:
+                info.update(template_id=template_id, context_id=context_id)
+            return info
 
-        # Fast path — already tracked and running.
-        if key in self._instances:
-            info = self._instances[key]
-            checked = self._running_checked_at.get(key)
-            if (
-                settings.status_cache_ttl > 0
-                and checked is not None
-                and time.monotonic() - checked < settings.status_cache_ttl
-            ):
-                self._record_activity(key)
-                return info
-            st = await self.status(info["instance_id"])
-            if st == "running":
-                self._running_checked_at[key] = time.monotonic()
-                self._record_activity(key)
-                return info
+    async def _ensure_terminal(self, template_id, context_id=DEFAULT_CONTEXT_ID, spec=None):
+        key = self._key(template_id, context_id)
+        info = self._instances.get(key)
+        if info and await self.status(info["workload_name"]) == "running":
+            return info
+        self.forget(key)
+        await self._apply_due_reset(template_id, context_id, spec)
+        info = await self.provision(template_id=template_id, context_id=context_id, spec=spec)
+        if info:
+            info.setdefault("started_at", time.time())
+            self._instances[key] = info
+            self._specs[key] = spec or {}
+        return info
 
-        # Serialise provisioning per key.
-        if key not in self._locks:
-            self._locks[key] = asyncio.Lock()
-
-        async with self._locks[key]:
-            # Re-check after acquiring lock — another request may have
-            # already provisioned while we were waiting.
-            if key in self._instances:
-                info = self._instances[key]
-                st = await self.status(info["instance_id"])
-                if st == "running":
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                    return info
-                self._instances.pop(key, None)
-                self._specs.pop(key, None)
-                self._activity.pop(key, None)
-                self._activity_wall.pop(key, None)
-                self._running_checked_at.pop(key, None)
-                self._activity_synced_at.pop(key, None)
-
-            await self._apply_due_reset(user_id, policy_id, context_id, spec)
-            result = await self.provision(
-                user_id, policy_id=policy_id, context_id=context_id, spec=spec
-            )
-            if result:
-                result.setdefault("started_at", time.time())
-                self._instances[key] = result
-                self._specs[key] = spec or {}
-                self._running_checked_at[key] = time.monotonic()
-                self._record_activity(key)
-            return result
-
-    async def get_terminal_info(
-        self,
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> Optional[dict]:
-        """Look up a running terminal without starting it or recording activity."""
-        info = self._instances.get(self._key(user_id, policy_id, context_id))
-        if info and await self.status(info["instance_id"]) == "running":
+    async def get_terminal_info(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+        info = self._instances.get(self._key(template_id, context_id))
+        if info and await self.status(info["workload_name"]) == "running":
             return info
         return None
 
-    async def touch_activity(
-        self,
-        user_id: str,
-        policy_id: str = "default",
-        context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> None:
-        """Record that *user_id*'s terminal is actively being used."""
-        context_id = normalize_context_id(context_id)
-        key = self._key(user_id, policy_id, context_id)
-        self._record_activity(key)
+    async def touch_activity(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+        key = self._key(template_id, context_id)
         checked = self._activity_synced_at.get(key)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
-        if checked is not None and time.monotonic() - checked < interval:
-            return
-        await mark_terminal_active(user_id, policy_id, context_id)
-        self._activity_synced_at[key] = time.monotonic()
+        if checked is None or time.monotonic() - checked >= interval:
+            await mark_terminal_active(template_id, context_id)
+            self._activity_synced_at[key] = time.monotonic()
 
-    async def _adopted_spec(self, policy_id: str) -> dict:
-        """Best-effort resolved spec for instances adopted during startup."""
-        try:
-            _, spec = await resolve_policy_spec(policy_id)
-            return spec or {}
-        except PolicyNotFoundError:
-            return {}
-        except Exception:
-            log.exception("Failed to resolve policy spec for %r", policy_id)
-            return {}
-
-    async def _seed_adopted_activity(
-        self,
-        key: tuple[str, str, str],
-        user_id: str,
-        policy_id: str,
-        context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> None:
-        """Preserve persisted idle time when adopting an existing instance."""
-        self._record_activity(key)
-        try:
-            last_active = await terminal_last_active_at(user_id, policy_id, context_id)
-        except Exception:
-            log.exception("Failed to load persisted activity for %s", key)
-            return
-        if not last_active:
-            return
-        wall = last_active.replace(tzinfo=timezone.utc).timestamp()
-        if wall < self._activity_wall[key]:
-            self._activity_wall[key] = wall
-            self._activity[key] = time.monotonic() - (time.time() - wall)
-
-    async def _apply_due_reset(
-        self,
-        user_id: str,
-        policy_id: str,
-        context_id: str,
-        spec: Optional[dict],
-    ) -> bool:
-        if not await reset_due_for(user_id, policy_id, context_id, spec):
+    async def _apply_due_reset(self, template_id, context_id, spec):
+        if not await reset_due_for(template_id, context_id):
             return False
-        await self.reset(user_id, policy_id, context_id, spec)
-        await mark_reset_applied(user_id, policy_id, context_id, spec)
-        log.info("Reset files for user=%s policy=%s", user_id, policy_id)
+        from terminals.utils.instances import stop_instance
+        await stop_instance(self, template_id, context_id)
+        await self.reset(template_id, context_id, spec)
+        await mark_reset_applied(template_id, context_id)
         return True
 
-    def _tracked_items(
-        self,
-        *,
-        user_id: str | None = None,
-        policy_id: str | None = None,
-        context_id: str | None = None,
-    ) -> list[tuple[tuple[str, str, str], str, str, str, dict, dict]]:
-        matches = []
-        for key, info in list(self._instances.items()):
-            item_user, item_policy, item_context = key
-            if user_id and item_user != user_id:
-                continue
-            if policy_id and item_policy != policy_id:
-                continue
-            if context_id is not None and item_context != normalize_context_id(context_id):
-                continue
-            matches.append(
-                (key, item_user, item_policy, item_context, info, self._specs.get(key, {}))
-            )
-        return matches
+    async def list_terminals(self, template_id=None):
+        from sqlalchemy import select
+        from terminals.db.session import async_session
+        from terminals.models.template import TemplateLifecycleState
+        from terminals.utils.instances import describe_instance
+        async with async_session() as session:
+            query = select(TemplateLifecycleState)
+            if template_id is not None:
+                query = query.where(TemplateLifecycleState.template_id == template_id)
+            rows = list(await session.scalars(query.order_by(TemplateLifecycleState.created_at)))
+        return [await describe_instance(self, row) for row in rows]
 
-    def _is_idle_by_activity(
-        self, key: tuple[str, str, str], spec: Optional[dict], now: float
-    ) -> bool:
-        timeout_min = (spec or {}).get(
-            "idle_timeout_minutes", settings.idle_timeout_minutes
-        )
-        if not timeout_min or timeout_min <= 0:
-            return False
-        last_active = self._activity.get(key, now)
-        return now - last_active >= timeout_min * 60
-
-    async def refresh(
-        self,
-        *,
-        user_id: str | None = None,
-        policy_id: str | None = None,
-        context_id: str | None = None,
-        only_idle: bool = True,
-        reset: bool = False,
-    ) -> RefreshResult:
-        """Tear down matching terminals so the next access provisions fresh."""
-        result = RefreshResult()
-        now = time.monotonic()
-
-        for key, item_user, item_policy, item_context, info, spec in self._tracked_items(
-            user_id=user_id, policy_id=policy_id, context_id=context_id
-        ):
-            result.matched += 1
-            st = await self.status(info["instance_id"])
-            idle = st != "running" or self._is_idle_by_activity(key, spec, now)
-            if only_idle and not idle:
-                result.skipped_active += 1
-                continue
-
-            await self.teardown(info["instance_id"])
-            self._instances.pop(key, None)
-            self._specs.pop(key, None)
-            self._activity.pop(key, None)
-            self._activity_wall.pop(key, None)
-            self._running_checked_at.pop(key, None)
-            self._activity_synced_at.pop(key, None)
-            self._locks.pop(key, None)
-            result.refreshed += 1
-
-            if reset:
-                await self.reset(item_user, item_policy, item_context, spec)
-                result.reset += 1
-
-        return result
-
-    async def list_terminals(self) -> list[dict]:
-        """Return sanitized tracked terminal instances for the admin UI."""
-        rows = []
-        now = time.monotonic()
-        for key, user_id, policy_id, context_id, info, spec in self._tracked_items():
-            status = await self.status(info["instance_id"])
-            last_active = self._activity.get(key)
-            last_active_wall = self._activity_wall.get(key)
-            timeout_min = (spec or {}).get(
-                "idle_timeout_minutes", settings.idle_timeout_minutes
-            )
-            rows.append(
-                {
-                    "user_id": user_id,
-                    "policy_id": policy_id,
-                    "context_id": context_id,
-                    "status": status,
-                    "instance_id": info.get("instance_id", ""),
-                    "instance_name": info.get("instance_name", info.get("instance_id", "")),
-                    "host": info.get("host", ""),
-                    "port": info.get("port"),
-                    "last_active_at": (
-                        datetime.fromtimestamp(last_active_wall, timezone.utc).isoformat()
-                        if last_active_wall
-                        else None
-                    ),
-                    "idle_seconds": int(now - last_active) if last_active else None,
-                    "idle_timeout_minutes": timeout_min or 0,
-                }
-            )
-        return rows
-
-    # ------------------------------------------------------------------
-    # Idle reaper
-    # ------------------------------------------------------------------
-
-    def start_reaper(self) -> None:
-        """Start the background idle-reaper task."""
-        if self._reaper_task is not None:
-            return
-        self._reaper_task = asyncio.create_task(self._reaper_loop())
-        log.info("Idle reaper started")
-
-    async def stop_reaper(self) -> None:
-        """Cancel the reaper and wait for it to finish."""
+    def start_reaper(self):
         if self._reaper_task is None:
-            return
-        self._reaper_task.cancel()
-        try:
-            await self._reaper_task
-        except asyncio.CancelledError:
-            pass
-        self._reaper_task = None
-        log.info("Idle reaper stopped")
+            self._reaper_task = asyncio.create_task(self._reaper_loop())
 
-    async def _reaper_loop(self) -> None:
-        """Periodically check for idle terminals and tear them down."""
+    async def stop_reaper(self):
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._reaper_task = None
+
+    async def _reaper_loop(self):
         while True:
             try:
                 await asyncio.sleep(60)
@@ -424,132 +147,33 @@ class Backend(ABC):
             except Exception:
                 log.exception("Idle reaper error")
 
-    async def _reap_idle(self) -> None:
-        """Scan tracked instances and tear down any that exceeded their timeout."""
-        now = time.monotonic()
-
-        for key in list(self._instances):
-            info = self._instances.get(key)
-            if info is None:
-                continue
-
-            spec = self._specs.get(key, {})
-            user_id, policy_id, context_id = key
-            cleanup_timeout = settings.idle_cleanup_timeout_seconds
-            if await reset_due_for(user_id, policy_id, context_id, spec):
-                log.info(
-                    "Refreshing terminal %s for due reset (user=%s, policy=%s)",
-                    info.get("instance_name", info.get("instance_id")),
-                    user_id,
-                    policy_id,
-                )
-                try:
-                    await asyncio.wait_for(
-                        self.teardown(info["instance_id"]), cleanup_timeout
-                    )
-                except asyncio.TimeoutError:
-                    log.error(
-                        "Teardown of %s timed out after %.0fs; will retry next sweep",
-                        key,
-                        cleanup_timeout,
-                    )
-                    continue
-                except Exception:
-                    log.exception("Failed to tear down %s for scheduled reset", key)
-                try:
-                    await asyncio.wait_for(
-                        self.reset(user_id, policy_id, context_id, spec), cleanup_timeout
-                    )
-                    await asyncio.wait_for(
-                        mark_reset_applied(user_id, policy_id, context_id, spec), cleanup_timeout
-                    )
-                except NotImplementedError:
-                    log.warning("Reset due for %s but backend does not support it", key)
-                except asyncio.TimeoutError:
-                    log.error(
-                        "Reset for %s timed out after %.0fs", key, cleanup_timeout
-                    )
-                except Exception:
-                    log.exception("Failed to reset files for %s", key)
-                self._instances.pop(key, None)
-                self._specs.pop(key, None)
-                self._activity.pop(key, None)
-                self._activity_wall.pop(key, None)
-                self._running_checked_at.pop(key, None)
-                self._activity_synced_at.pop(key, None)
-                self._locks.pop(key, None)
-                continue
-
-            timeout_min = spec.get(
-                "idle_timeout_minutes", settings.idle_timeout_minutes
-            )
-            lifetime_min = spec.get(
-                "max_lifetime_minutes", settings.max_lifetime_minutes
-            )
-            # Instances tracked without a start time count from first sight.
-            started_at = info.setdefault("started_at", time.time())
-            expired = bool(lifetime_min and lifetime_min > 0) and (
-                time.time() - started_at >= lifetime_min * 60
-            )
-            if not expired and (not timeout_min or timeout_min <= 0):
-                continue
-
-            idle_seconds = 0.0
-            if not expired:
-                shared_last_active = await terminal_last_active_at(
-                    user_id, policy_id, context_id
-                )
-                if shared_last_active:
-                    shared_wall = shared_last_active.replace(tzinfo=timezone.utc).timestamp()
-                    if shared_wall > self._activity_wall.get(key, 0):
-                        self._activity_wall[key] = shared_wall
-                        self._activity[key] = now
-
-                last_active = self._activity.get(key, now)
-                idle_seconds = now - last_active
-
-            if expired or idle_seconds >= timeout_min * 60:
-                log.info(
-                    "Reaping terminal %s (user=%s, policy=%s, context=%s, idle=%.0fs, timeout=%sm, max_lifetime=%sm, expired=%s)",
-                    info.get("instance_name", info.get("instance_id")),
-                    user_id,
-                    policy_id,
-                    context_id,
-                    idle_seconds,
-                    timeout_min,
-                    lifetime_min,
-                    expired,
-                )
-                try:
-                    await asyncio.wait_for(
-                        self.teardown(info["instance_id"]), cleanup_timeout
-                    )
-                except asyncio.TimeoutError:
-                    log.error(
-                        "Teardown of %s timed out after %.0fs; will retry next sweep",
-                        key,
-                        cleanup_timeout,
-                    )
-                    continue
-                except Exception:
-                    log.exception("Failed to tear down %s", key)
-                try:
-                    await asyncio.wait_for(
-                        self._apply_due_reset(user_id, policy_id, context_id, spec),
-                        cleanup_timeout,
-                    )
-                except NotImplementedError:
-                    log.warning("Reset due for %s but backend does not support it", key)
-                except asyncio.TimeoutError:
-                    log.error(
-                        "Reset for %s timed out after %.0fs", key, cleanup_timeout
-                    )
-                except Exception:
-                    log.exception("Failed to reset files for %s", key)
-                self._instances.pop(key, None)
-                self._specs.pop(key, None)
-                self._activity.pop(key, None)
-                self._activity_wall.pop(key, None)
-                self._running_checked_at.pop(key, None)
-                self._activity_synced_at.pop(key, None)
-                self._locks.pop(key, None)
+    async def _reap_idle(self):
+        from sqlalchemy import select
+        from terminals.db.session import async_session
+        from terminals.models.template import TemplateLifecycleState
+        from terminals.utils.instances import instance_lock, stop_instance
+        async with async_session() as session:
+            rows = list(await session.scalars(select(TemplateLifecycleState)))
+        for row in rows:
+            try:
+                async with instance_lock("template:" + row.template_id, shared=True), instance_lock(row.id):
+                    async with async_session() as session:
+                        if await session.get(TemplateLifecycleState, row.id) is None:
+                            continue
+                    current_spec = await resolve_template_spec(row.template_id)
+                    spec = self._specs.get(row.id, current_spec) or {}
+                    async with asyncio.timeout(settings.idle_cleanup_timeout_seconds):
+                        if await self._apply_due_reset(row.template_id, row.context_id, spec):
+                            continue
+                        info = self._instances.get(row.id)
+                        if not info:
+                            continue
+                        last_active = await terminal_last_active_at(row.template_id, row.context_id)
+                        active_at = last_active.replace(tzinfo=timezone.utc).timestamp() if last_active else time.time()
+                        idle = spec.get("idle_timeout_minutes", settings.idle_timeout_minutes)
+                        lifetime = spec.get("max_lifetime_minutes", settings.max_lifetime_minutes)
+                        expired = lifetime and lifetime > 0 and time.time() - info.get("started_at", time.time()) >= lifetime * 60
+                        if expired or (idle and idle > 0 and time.time() - active_at >= idle * 60):
+                            await stop_instance(self, row.template_id, row.context_id)
+            except Exception:
+                log.exception("Failed lifecycle sweep for %s", row.id)

@@ -10,18 +10,16 @@ This backend reads the key from the Secret referenced in ``status.apiKeySecret``
 
 import asyncio
 import base64
-import hashlib
 import logging
-import re
 import time
 from typing import Optional
 
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import ApiClient
 
-from terminals.backends.base import Backend, ProvisioningError, RefreshResult, parse_started_at
-from terminals.backends.kubernetes import _cleanup_user_pvcs, _list_user_data
+from terminals.backends.base import Backend, ProvisioningError, parse_started_at
 from terminals.config import settings
+from terminals.utils.kubernetes_labels import template_label
 from terminals.utils.network_profiles import resolve_network_profile
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
@@ -30,6 +28,7 @@ from terminals.utils.context import (
     DEFAULT_CONTEXT_ID,
     context_hash,
     normalize_context_id,
+    get_terminal_id,
 )
 from terminals.utils.env import build_terminal_env
 from terminals.utils.kubernetes_security import (
@@ -39,7 +38,8 @@ from terminals.utils.kubernetes_security import (
     restricted_enabled,
 )
 from terminals.utils.kubernetes_scheduling import node_selector, tolerations
-from terminals.utils.policy_lifecycle import mark_terminal_active
+from terminals.utils.template_lifecycle import mark_terminal_active
+from terminals.utils.image_pull import pull_policy
 
 log = logging.getLogger(__name__)
 
@@ -47,30 +47,15 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_DNS_SAFE = re.compile(r"[^a-z0-9-]")
-_POLICY_ID_ANNOTATION = "openwebui.com/policy-id"
+_TEMPLATE_ID_ANNOTATION = "openwebui.com/template-id"
 
 
-def _sanitize_name(
-    user_id: str,
-    policy_id: str = "default",
-    context_id: str = DEFAULT_CONTEXT_ID,
-) -> str:
-    """Deterministic, DNS-safe Terminal CR name from a user ID + policy."""
-    short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
-    context_id = normalize_context_id(context_id)
-    if policy_id == "default":
-        name = f"terminal-{short}"
-    else:
-        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-        name = f"terminal-{short}-{policy_slug}"
-    if context_id != DEFAULT_CONTEXT_ID:
-        name = f"{name}-{context_hash(context_id)}"
-    return name
+def _sanitize_name(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> str:
+    return f"terminal-{get_terminal_id(template_id, context_id)}"
 
 
 class KubernetesOperatorBackend(Backend):
-    """Manage terminal instances via Terminal CRDs.
+    """Manage terminal environments via Terminal CRDs.
 
     The backend creates/deletes ``Terminal`` custom resources in the
     configured namespace.  A Kopf operator running in the cluster watches
@@ -80,7 +65,7 @@ class KubernetesOperatorBackend(Backend):
     def __init__(self) -> None:
         super().__init__()
         self._api_client: Optional[ApiClient] = None
-        self._last_activity_status_updated_at: dict[tuple[str, str, str], float] = {}
+        self._last_activity_status_updated_at: dict[str, float] = {}
 
     async def _ensure_client(self) -> ApiClient:
         if self._api_client is None:
@@ -125,14 +110,13 @@ class KubernetesOperatorBackend(Backend):
 
     async def _get_terminal_cr(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
     ) -> Optional[dict]:
-        """Get the Terminal CR for a user+policy, or None if it doesn't exist."""
+        """Get the Terminal CR for a template/context, or None if it doesn't exist."""
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id, context_id)
+        name = _sanitize_name(template_id, context_id)
         ns = settings.kubernetes_namespace
         try:
             cr = await custom.get_namespaced_custom_object(
@@ -160,27 +144,28 @@ class KubernetesOperatorBackend(Backend):
 
     async def _create_terminal_cr(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
-        """Create a Terminal CR for a user+policy and return it."""
+        """Create a Terminal CR for a template/context and return it."""
         profile = resolve_network_profile(spec, "kubernetes-operator")
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
         context_id = normalize_context_id(context_id)
-        name = _sanitize_name(user_id, policy_id, context_id)
+        name = _sanitize_name(template_id, context_id)
         ns = settings.kubernetes_namespace
-        s = spec or {}
+        s = dict(spec or {})
+        s.setdefault("storage", settings.kubernetes_storage_size)
 
         image = s.get("image", settings.effective_kubernetes_image)
         storage_size = s.get("storage")  # absent = ephemeral
 
         # Build CRD spec aligned with manifests/terminal-crd.yaml.
         cr_spec: dict = {
-            "userId": user_id,
+            "templateId": template_id,
             "image": image,
+            "imagePullPolicy": pull_policy(image),
             "contextId": context_id,
         }
         restricted = restricted_enabled(s)
@@ -207,9 +192,6 @@ class KubernetesOperatorBackend(Backend):
             cr_spec["storage"] = storage_size
             if settings.kubernetes_storage_class:
                 cr_spec["storageClass"] = settings.kubernetes_storage_class
-            # Storage mode (per-user, shared, shared-rwo)
-            storage_mode = s.get("storage_mode", settings.kubernetes_storage_mode)
-            cr_spec["storageMode"] = storage_mode
             cr_spec["persistence"] = {
                 "enabled": True,
                 "size": storage_size,
@@ -239,7 +221,7 @@ class KubernetesOperatorBackend(Backend):
         if idle_timeout is not None and idle_timeout >= 0:
             cr_spec["idleTimeoutMinutes"] = idle_timeout
 
-        policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
+        template_slug = template_label(template_id)
 
         cr = {
             "apiVersion": f"{self._group}/{self._version}",
@@ -250,8 +232,8 @@ class KubernetesOperatorBackend(Backend):
                 "labels": {
                     "app.kubernetes.io/managed-by": "terminals",
                     "app.kubernetes.io/part-of": "open-terminal",
-                    "openwebui.com/user-id": user_id,
-                    "openwebui.com/policy": policy_slug,
+                    "openwebui.com/instance": get_terminal_id(template_id, context_id),
+                    "openwebui.com/template": template_slug,
                     CONTEXT_TYPE_LABEL: (
                         DEFAULT_CONTEXT_ID
                         if context_id == DEFAULT_CONTEXT_ID
@@ -260,7 +242,7 @@ class KubernetesOperatorBackend(Backend):
                     CONTEXT_HASH_LABEL: context_hash(context_id),
                 },
                 "annotations": {
-                    _POLICY_ID_ANNOTATION: policy_id,
+                    _TEMPLATE_ID_ANNOTATION: template_id,
                     CONTEXT_ID_ANNOTATION: context_id,
                 },
             },
@@ -278,11 +260,11 @@ class KubernetesOperatorBackend(Backend):
         except client.exceptions.ApiException as exc:
             if exc.status == 409:
                 # Already exists — but may be mid-deletion (finalizer pending).
-                existing = await self._get_terminal_cr(user_id, policy_id, context_id)
+                existing = await self._get_terminal_cr(template_id, context_id)
                 if existing and existing.get("metadata", {}).get("deletionTimestamp"):
                     # CR is being deleted; wait for it to vanish, then retry create
                     await self._wait_for_deletion(
-                        user_id, policy_id, context_id=context_id, timeout=60
+                        template_id, context_id=context_id, timeout=60
                     )
                     return await custom.create_namespaced_custom_object(
                         group=self._group,
@@ -305,30 +287,27 @@ class KubernetesOperatorBackend(Backend):
 
     async def _delete_terminal_cr(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         wait: bool = True,
         timeout: int = 60,
     ) -> bool:
-        """Delete the Terminal CR for a user+policy and optionally wait for it to be gone.
+        """Delete the Terminal CR for a template/context and optionally wait for it to be gone.
 
         When *wait* is True (default), polls until the CR returns 404 so that
         a subsequent create won't collide with the kopf finalizer.
         """
         context_id = normalize_context_id(context_id)
-        key = self._key(user_id, policy_id, context_id)
+        key = self._key(template_id, context_id)
         self._instances.pop(key, None)
         self._specs.pop(key, None)
-        self._activity.pop(key, None)
-        self._activity_wall.pop(key, None)
         self._running_checked_at.pop(key, None)
         self._activity_synced_at.pop(key, None)
         self._last_activity_status_updated_at.pop(key, None)
 
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id, context_id)
+        name = _sanitize_name(template_id, context_id)
         ns = settings.kubernetes_namespace
         try:
             await custom.delete_namespaced_custom_object(
@@ -363,20 +342,18 @@ class KubernetesOperatorBackend(Backend):
                 raise
             await asyncio.sleep(1)
 
-        log.warning("Terminal CR %s not fully deleted after %ds", name, timeout)
-        return True
+        raise RuntimeError(f"Terminal CR {name} is still terminating after {timeout}s")
 
     async def _wait_for_deletion(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         timeout: int = 60,
     ) -> None:
         """Poll until a Terminal CR no longer exists (404)."""
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id, context_id)
+        name = _sanitize_name(template_id, context_id)
         ns = settings.kubernetes_namespace
 
         deadline = asyncio.get_event_loop().time() + timeout
@@ -441,27 +418,6 @@ class KubernetesOperatorBackend(Backend):
         )
         return None
 
-    async def _name_from_uid(self, uid: str) -> Optional[str]:
-        """Look up a Terminal CR name by its UID."""
-        api_client = await self._ensure_client()
-        custom = client.CustomObjectsApi(api_client)
-        ns = settings.kubernetes_namespace
-
-        try:
-            result = await custom.list_namespaced_custom_object(
-                group=self._group,
-                version=self._version,
-                namespace=ns,
-                plural=self._plural,
-                label_selector="app.kubernetes.io/managed-by=terminals",
-            )
-            for item in result.get("items", []):
-                if item["metadata"]["uid"] == uid:
-                    return item["metadata"]["name"]
-        except client.exceptions.ApiException:
-            pass
-        return None
-
     def _parse_service_url(self, service_url: str) -> tuple[str, int]:
         """Extract host and port from a service URL like http://svc:8000."""
         url = service_url.rstrip("/")
@@ -499,46 +455,19 @@ class KubernetesOperatorBackend(Backend):
                 raise
             await asyncio.sleep(0.5)
 
-    async def list_user_data(self) -> list[str]:
-        api_client = await self._ensure_client()
-        return await _list_user_data(client.CoreV1Api(api_client))
-
-    async def cleanup_user(self, user_id: str) -> int:
-        api_client = await self._ensure_client()
-        custom = client.CustomObjectsApi(api_client)
-        for attempt in range(61):
-            crs = await custom.list_namespaced_custom_object(
-                group=self._group,
-                version=self._version,
-                namespace=settings.kubernetes_namespace,
-                plural=self._plural,
-                label_selector="app.kubernetes.io/managed-by=terminals",
-            )
-            matching = [
-                item for item in crs.get("items", [])
-                if item.get("metadata", {}).get("labels", {}).get("openwebui.com/user-id") == user_id
-                or item.get("spec", {}).get("userId") == user_id
-            ]
-            if not matching:
-                break
-            if attempt == 60 or any(not item.get("metadata", {}).get("deletionTimestamp") for item in matching):
-                raise RuntimeError("Terminal resources still exist; user data has not been deleted. Remove them and retry.")
-            await asyncio.sleep(0.5)
-        return await _cleanup_user_pvcs(client.CoreV1Api(api_client), user_id)
-
     async def reset(
         self,
-        user_id: str,
-        policy_id: str,
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> None:
         api_client = await self._ensure_client()
         core = client.CoreV1Api(api_client)
         ns = settings.kubernetes_namespace
-        s = spec or {}
+        s = dict(spec or {})
+        s.setdefault("storage", settings.kubernetes_storage_size)
         context_id = normalize_context_id(context_id)
-        terminal_name = _sanitize_name(user_id, policy_id, context_id)
+        terminal_name = _sanitize_name(template_id, context_id)
         reset_name = f"{terminal_name[:57]}-reset"
         claim_name = f"{terminal_name}-pvc"
 
@@ -552,8 +481,8 @@ class KubernetesOperatorBackend(Backend):
         labels = {
             "app.kubernetes.io/managed-by": "terminals",
             "app.kubernetes.io/part-of": "open-terminal",
-            "openwebui.com/user-id": user_id,
-            "openwebui.com/policy": _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20],
+            "openwebui.com/instance": get_terminal_id(template_id, context_id),
+            "openwebui.com/template": template_label(template_id),
             CONTEXT_TYPE_LABEL: (
                 DEFAULT_CONTEXT_ID
                 if context_id == DEFAULT_CONTEXT_ID
@@ -570,6 +499,7 @@ class KubernetesOperatorBackend(Backend):
             (item for item in template.get("containers", []) if item.get("name") == "open-terminal"),
             {},
         )
+        reset_image = s.get("image", settings.effective_kubernetes_image)
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
             spec=client.V1PodSpec(
@@ -581,7 +511,8 @@ class KubernetesOperatorBackend(Backend):
                 containers=[
                     client.V1Container(
                         name="reset",
-                        image=s.get("image", settings.effective_kubernetes_image),
+                        image=reset_image,
+                        image_pull_policy=pull_policy(reset_image),
                         security_context=deep_merge(
                             terminal_container.get("securityContext"), container_security_context(s)
                         ) or None,
@@ -634,84 +565,9 @@ class KubernetesOperatorBackend(Backend):
         except client.exceptions.ApiException:
             pass
 
-    async def refresh(
-        self,
-        *,
-        user_id: str | None = None,
-        policy_id: str | None = None,
-        context_id: str | None = None,
-        only_idle: bool = True,
-        reset: bool = False,
-    ) -> RefreshResult:
-        api_client = await self._ensure_client()
-        custom = client.CustomObjectsApi(api_client)
-        ns = settings.kubernetes_namespace
-        result = RefreshResult()
-
-        selector = "app.kubernetes.io/managed-by=terminals"
-        crs = await custom.list_namespaced_custom_object(
-            group=self._group,
-            version=self._version,
-            namespace=ns,
-            plural=self._plural,
-            label_selector=selector,
-        )
-        for item in crs.get("items", []):
-            labels = item.get("metadata", {}).get("labels", {})
-            annotations = item.get("metadata", {}).get("annotations", {})
-            item_user = labels.get("openwebui.com/user-id") or item.get("spec", {}).get("userId")
-            item_policy = annotations.get(_POLICY_ID_ANNOTATION) or labels.get(
-                "openwebui.com/policy", "default"
-            )
-            item_context = normalize_context_id(
-                item.get("spec", {}).get("contextId")
-                or annotations.get(CONTEXT_ID_ANNOTATION)
-            )
-            if user_id and item_user != user_id:
-                continue
-            if policy_id and item_policy != policy_id:
-                continue
-            if context_id is not None and item_context != normalize_context_id(context_id):
-                continue
-
-            result.matched += 1
-            phase = (item.get("status") or {}).get("phase")
-            if only_idle and phase == "Running":
-                result.skipped_active += 1
-                continue
-
-            name = item["metadata"]["name"]
-            await custom.delete_namespaced_custom_object(
-                group=self._group,
-                version=self._version,
-                namespace=ns,
-                plural=self._plural,
-                name=name,
-            )
-            key = self._key(item_user or "", item_policy, item_context)
-            self._instances.pop(key, None)
-            self._specs.pop(key, None)
-            self._activity.pop(key, None)
-            self._activity_wall.pop(key, None)
-            self._running_checked_at.pop(key, None)
-            self._activity_synced_at.pop(key, None)
-            self._last_activity_status_updated_at.pop(key, None)
-            result.refreshed += 1
-
-            if reset and item_user:
-                await self.reset(item_user, item_policy, item_context, item.get("spec") or {})
-                result.reset += 1
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Backend interface
-    # ------------------------------------------------------------------
-
     async def provision(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> Optional[dict]:
@@ -721,7 +577,7 @@ class KubernetesOperatorBackend(Backend):
         """
         context_id = normalize_context_id(context_id)
         cr = await self._create_terminal_cr(
-            user_id, policy_id=policy_id, context_id=context_id, spec=spec
+            template_id=template_id, context_id=context_id, spec=spec
         )
         name = cr["metadata"]["name"]
         ns = settings.kubernetes_namespace
@@ -730,8 +586,7 @@ class KubernetesOperatorBackend(Backend):
         if ready:
             host, port = self._parse_service_url(ready["service_url"])
             return {
-                "instance_id": cr["metadata"]["uid"],
-                "instance_name": name,
+                "workload_name": name,
                 "api_key": ready["api_key"],
                 "host": host,
                 "port": port,
@@ -739,68 +594,12 @@ class KubernetesOperatorBackend(Backend):
 
         return None
 
-    async def start(self, instance_id: str) -> bool:
-        """For idle terminals, delete and re-create the CR."""
-        name = await self._name_from_uid(instance_id)
-        if name is None:
-            return False
 
+
+    async def status(self, name: str) -> str:
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
         ns = settings.kubernetes_namespace
-
-        try:
-            cr = await custom.get_namespaced_custom_object(
-                group=self._group,
-                version=self._version,
-                namespace=ns,
-                plural=self._plural,
-                name=name,
-            )
-        except client.exceptions.ApiException:
-            return False
-
-        phase = cr.get("status", {}).get("phase")
-        if phase == "Running":
-            return True
-        if phase in ("Pending", "Provisioning"):
-            return True  # still coming up
-
-        # Idle or Error means the caller should refresh this CR.
-        return False
-
-    async def teardown(self, instance_id: str) -> None:
-        api_client = await self._ensure_client()
-        custom = client.CustomObjectsApi(api_client)
-        ns = settings.kubernetes_namespace
-
-        name = await self._name_from_uid(instance_id)
-        if name is None:
-            log.warning("No Terminal CR found for UID %s", instance_id)
-            return
-
-        try:
-            await custom.delete_namespaced_custom_object(
-                group=self._group,
-                version=self._version,
-                namespace=ns,
-                plural=self._plural,
-                name=name,
-            )
-            log.info("Deleted Terminal CR %s", name)
-        except client.exceptions.ApiException:
-            log.warning(
-                "Could not delete Terminal CR %s (may already be gone)", name
-            )
-
-    async def status(self, instance_id: str) -> str:
-        api_client = await self._ensure_client()
-        custom = client.CustomObjectsApi(api_client)
-        ns = settings.kubernetes_namespace
-
-        name = await self._name_from_uid(instance_id)
-        if name is None:
-            return "missing"
 
         try:
             cr = await custom.get_namespaced_custom_object(
@@ -818,7 +617,9 @@ class KubernetesOperatorBackend(Backend):
             if phase == "Idle":
                 return "stopped"
             return "stopped"
-        except client.exceptions.ApiException:
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
             return "missing"
 
     async def close(self) -> None:
@@ -830,22 +631,20 @@ class KubernetesOperatorBackend(Backend):
     # Operator-aware ensure_terminal
     # ------------------------------------------------------------------
 
-    async def ensure_terminal(
+    async def _ensure_terminal(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: Optional[dict] = None,
     ) -> Optional[dict]:
         """Get or create a terminal, resolving from K8s CRDs.
 
-        Uses a per-key lock so concurrent requests for the same user+policy
-        don't race to create the same CR.
+        Called under the instance lock by ensure_terminal.
 
         Returns a dict with ``api_key``, ``host``, ``port`` or ``None``.
         """
         context_id = normalize_context_id(context_id)
-        key = self._key(user_id, policy_id, context_id)
+        key = self._key(template_id, context_id)
         checked = self._running_checked_at.get(key)
         if (
             key in self._instances
@@ -853,121 +652,84 @@ class KubernetesOperatorBackend(Backend):
             and checked is not None
             and time.monotonic() - checked < settings.status_cache_ttl
         ):
-            self._record_activity(key)
             return self._instances[key]
 
-        # Fast path: check if CR is already Running without taking the lock.
-        cr = await self._get_terminal_cr(user_id, policy_id, context_id)
-        if cr:
-            status = cr.get("status") or {}
-            phase = status.get("phase")
-            if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
-                api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-                if api_key:
-                    host, port = self._parse_service_url(status["serviceUrl"])
-                    info = {
-                        "instance_id": cr["metadata"]["uid"],
-                        "instance_name": cr["metadata"]["name"],
-                        "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
-                        "api_key": api_key,
-                        "host": host,
-                        "port": port,
-                    }
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                    return info
+        cr = await self._get_terminal_cr(template_id, context_id)
 
-        # Serialise provisioning per key.
-        if key not in self._locks:
-            self._locks[key] = asyncio.Lock()
+        if cr is None:
+            await self._apply_due_reset(template_id, context_id, spec)
+            info = await self.provision(
+                template_id=template_id, context_id=context_id, spec=spec
+            )
+            if info:
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+            return info
 
-        async with self._locks[key]:
-            # Re-check after acquiring lock.
-            cr = await self._get_terminal_cr(user_id, policy_id, context_id)
+        status = cr.get("status") or {}
+        phase = status.get("phase")
 
-            if cr is None:
-                await self._apply_due_reset(user_id, policy_id, context_id, spec)
-                info = await self.provision(
-                    user_id, policy_id=policy_id, context_id=context_id, spec=spec
-                )
-                if info:
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                return info
+        if phase in ("Idle", "Error"):
+            log.info(
+                "Terminal CR %s in phase %s, deleting before refresh",
+                cr["metadata"]["name"],
+                phase,
+            )
+            await self._delete_terminal_cr(template_id, context_id=context_id)
+            await self._apply_due_reset(template_id, context_id, spec)
+            info = await self.provision(
+                template_id=template_id, context_id=context_id, spec=spec
+            )
+            if info:
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+            return info
 
-            status = cr.get("status") or {}
-            phase = status.get("phase")
-
-            if phase in ("Idle", "Error"):
-                log.info(
-                    "Terminal CR %s in phase %s, deleting before refresh",
-                    cr["metadata"]["name"],
-                    phase,
-                )
-                await self._delete_terminal_cr(user_id, policy_id, context_id=context_id)
-                await self._apply_due_reset(user_id, policy_id, context_id, spec)
-                info = await self.provision(
-                    user_id, policy_id=policy_id, context_id=context_id, spec=spec
-                )
-                if info:
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                return info
-
-            if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
-                api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
-                if api_key:
-                    host, port = self._parse_service_url(status["serviceUrl"])
-                    info = {
-                        "instance_id": cr["metadata"]["uid"],
-                        "instance_name": cr["metadata"]["name"],
-                        "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
-                        "api_key": api_key,
-                        "host": host,
-                        "port": port,
-                    }
-                    self._instances[key] = info
-                    self._specs[key] = spec or {}
-                    self._running_checked_at[key] = time.monotonic()
-                    self._record_activity(key)
-                    return info
-
-            # Still provisioning — wait for the operator to bring it up
-            name = cr["metadata"]["name"]
-            ns = settings.kubernetes_namespace
-            ready = await self._wait_for_ready(name, ns)
-            if ready:
-                host, port = self._parse_service_url(ready["service_url"])
+        if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
+            api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+            if api_key:
+                host, port = self._parse_service_url(status["serviceUrl"])
                 info = {
-                    "instance_id": cr["metadata"]["uid"],
-                    "instance_name": cr["metadata"]["name"],
+                    "workload_name": cr["metadata"]["name"],
                     "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
-                    "api_key": ready["api_key"],
+                    "api_key": api_key,
                     "host": host,
                     "port": port,
                 }
                 self._instances[key] = info
                 self._specs[key] = spec or {}
                 self._running_checked_at[key] = time.monotonic()
-                self._record_activity(key)
                 return info
 
-            return None
+        # Still provisioning — wait for the operator to bring it up
+        name = cr["metadata"]["name"]
+        ns = settings.kubernetes_namespace
+        ready = await self._wait_for_ready(name, ns)
+        if ready:
+            host, port = self._parse_service_url(ready["service_url"])
+            info = {
+                "workload_name": cr["metadata"]["name"],
+                "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
+                "api_key": ready["api_key"],
+                "host": host,
+                "port": port,
+            }
+            self._instances[key] = info
+            self._specs[key] = spec or {}
+            self._running_checked_at[key] = time.monotonic()
+            return info
+
+        return None
 
     async def get_terminal_info(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
     ) -> Optional[dict]:
         """Look up an existing terminal from the K8s CRD without creating one."""
-        cr = await self._get_terminal_cr(user_id, policy_id, context_id)
+        cr = await self._get_terminal_cr(template_id, context_id)
         if cr is None:
             return None
 
@@ -979,8 +741,7 @@ class KubernetesOperatorBackend(Backend):
             if api_key:
                 host, port = self._parse_service_url(status["serviceUrl"])
                 return {
-                    "instance_id": cr["metadata"]["uid"],
-                    "instance_name": cr["metadata"]["name"],
+                    "workload_name": cr["metadata"]["name"],
                     "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
                     "api_key": api_key,
                     "host": host,
@@ -991,26 +752,24 @@ class KubernetesOperatorBackend(Backend):
 
     async def touch_activity(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
     ) -> None:
         """Update lastActivityAt on the Terminal CR to prevent idle culling."""
         context_id = normalize_context_id(context_id)
-        key = self._key(user_id, policy_id, context_id)
+        key = self._key(template_id, context_id)
         checked = self._last_activity_status_updated_at.get(key)
-        self._record_activity(key)
         synced = self._activity_synced_at.get(key)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
         if synced is None or time.monotonic() - synced >= interval:
-            await mark_terminal_active(user_id, policy_id, context_id)
+            await mark_terminal_active(template_id, context_id)
             self._activity_synced_at[key] = time.monotonic()
         if checked is not None and time.monotonic() - checked < interval:
             return
 
         api_client = await self._ensure_client()
         custom = client.CustomObjectsApi(api_client)
-        name = _sanitize_name(user_id, policy_id, context_id)
+        name = _sanitize_name(template_id, context_id)
         ns = settings.kubernetes_namespace
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1029,5 +788,5 @@ class KubernetesOperatorBackend(Backend):
             if e.status != 404:
                 log.warning("Failed to touch activity for %s: %s", name, e)
             else:
-                self.invalidate_status(user_id, policy_id, context_id)
+                self.invalidate_status(template_id, context_id)
                 self._last_activity_status_updated_at.pop(key, None)

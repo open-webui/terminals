@@ -1,4 +1,4 @@
-"""Resolve administrator-defined networking configuration for a policy."""
+"""Resolve administrator-defined networking configuration for a template."""
 
 from terminals.backends.base import ProvisioningError
 from terminals.config import settings

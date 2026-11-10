@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TERMINALS_", env_file=".env")
 
     api_key: str = ""
-    open_webui_url: str = ""  # if set, validate JWTs against this Open WebUI instance
 
     # Database
     database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DATA_DIR}/terminals.db"
@@ -27,6 +26,18 @@ class Settings(BaseSettings):
 
     # Docker settings
     image: str = "ghcr.io/open-webui/open-terminal:latest"
+    # Always, IfNotPresent, or Never; empty pulls :latest (or untagged) images on every
+    # start and other tags only when missing. Applies to every backend.
+    image_pull_policy: str = ""
+    # Docker only: how long a pulled image is trusted before Always checks the registry again.
+    image_pull_interval_seconds: int = 3600
+
+    @field_validator("image_pull_policy")
+    @classmethod
+    def _validate_image_pull_policy(cls, value: str) -> str:
+        from terminals.utils.image_pull import normalize_policy
+
+        return normalize_policy(value)
     docker_network: str = Field(
         default="",
         validation_alias=AliasChoices("TERMINALS_DOCKER_NETWORK", "TERMINALS_NETWORK"),
@@ -52,7 +63,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     enable_ui: bool = True
     status_cache_ttl: int = 30
-    token_cache_ttl: int = 60
     ws_compression: bool = False
     access_log: bool = False
     replay_body_limit: int | None = None
@@ -99,7 +109,7 @@ class Settings(BaseSettings):
     # Hard cap — tear down terminals N minutes after they start, even if active (0 = disabled)
     max_lifetime_minutes: int = 0
 
-    # Policy hard caps (cannot be exceeded by API)
+    # Template hard caps (cannot be exceeded by API)
     max_cpu: str = ""              # TERMINALS_MAX_CPU
     max_memory: str = ""           # TERMINALS_MAX_MEMORY
     max_storage: str = ""          # TERMINALS_MAX_STORAGE
