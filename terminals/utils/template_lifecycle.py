@@ -1,4 +1,4 @@
-"""Helpers for recurring policy lifecycle work."""
+"""Helpers for recurring template lifecycle work."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from croniter import croniter
 from sqlalchemy import select
 
 from terminals.db.session import async_session
-from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id
+from terminals.utils.context import DEFAULT_CONTEXT_ID, normalize_context_id, get_terminal_id
 
 RESET_KEY = "reset"
 ACTIVITY_KEY = "activity"
@@ -118,23 +118,21 @@ def next_reset_after(
 
 
 async def reset_due_for(
-    user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
-    spec: dict | None = None,
 ) -> bool:
-    """Return True if this user/policy/context has a reset due."""
+    """Return True if this template/context has a reset due."""
     if async_session is None:
         return False
 
     now = _utc_now()
     context_id = normalize_context_id(context_id)
 
-    from terminals.models.policy import PolicyLifecycle, PolicyLifecycleState
+    from terminals.models.template import TemplateLifecycle, TemplateLifecycleState
 
     async with async_session() as session:
         lifecycle_row = await session.execute(
-            select(PolicyLifecycle).where(PolicyLifecycle.policy_id == policy_id)
+            select(TemplateLifecycle).where(TemplateLifecycle.template_id == template_id)
         )
         lifecycle = lifecycle_row.scalar_one_or_none()
         lifecycle_data = dict(lifecycle.data or {}) if lifecycle else {}
@@ -146,22 +144,14 @@ async def reset_due_for(
         timezone_name = reset_config.get("timezone") or "UTC"
 
         state_row = await session.execute(
-            select(PolicyLifecycleState).where(
-                PolicyLifecycleState.user_id == user_id,
-                PolicyLifecycleState.policy_id == policy_id,
-                PolicyLifecycleState.context_id == context_id,
+            select(TemplateLifecycleState).where(
+                TemplateLifecycleState.template_id == template_id,
+                TemplateLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
-            state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}:{context_id}",
-                user_id=user_id,
-                policy_id=policy_id,
-                context_id=context_id,
-                data={},
-            )
-            session.add(state)
+            return False
 
         data = dict(state.data or {})
         reset = dict(data.get(RESET_KEY) or {})
@@ -183,10 +173,8 @@ async def reset_due_for(
 
 
 async def mark_reset_applied(
-    user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
-    spec: dict | None = None,
 ) -> None:
     if async_session is None:
         return
@@ -194,11 +182,11 @@ async def mark_reset_applied(
     now = _utc_now()
     context_id = normalize_context_id(context_id)
 
-    from terminals.models.policy import PolicyLifecycle, PolicyLifecycleState
+    from terminals.models.template import TemplateLifecycle, TemplateLifecycleState
 
     async with async_session() as session:
         lifecycle_row = await session.execute(
-            select(PolicyLifecycle).where(PolicyLifecycle.policy_id == policy_id)
+            select(TemplateLifecycle).where(TemplateLifecycle.template_id == template_id)
         )
         lifecycle = lifecycle_row.scalar_one_or_none()
         lifecycle_data = dict(lifecycle.data or {}) if lifecycle else {}
@@ -210,22 +198,14 @@ async def mark_reset_applied(
         timezone_name = reset_config.get("timezone") or "UTC"
 
         state_row = await session.execute(
-            select(PolicyLifecycleState).where(
-                PolicyLifecycleState.user_id == user_id,
-                PolicyLifecycleState.policy_id == policy_id,
-                PolicyLifecycleState.context_id == context_id,
+            select(TemplateLifecycleState).where(
+                TemplateLifecycleState.template_id == template_id,
+                TemplateLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
-            state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}:{context_id}",
-                user_id=user_id,
-                policy_id=policy_id,
-                context_id=context_id,
-                data={},
-            )
-            session.add(state)
+            return False
 
         data = dict(state.data or {})
         reset = dict(data.get(RESET_KEY) or {})
@@ -247,8 +227,7 @@ async def mark_reset_applied(
 
 
 async def mark_terminal_active(
-    user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
 ) -> None:
     """Persist a cross-worker activity heartbeat for a terminal."""
@@ -258,26 +237,18 @@ async def mark_terminal_active(
     now = _utc_now()
     context_id = normalize_context_id(context_id)
 
-    from terminals.models.policy import PolicyLifecycleState
+    from terminals.models.template import TemplateLifecycleState
 
     async with async_session() as session:
         state_row = await session.execute(
-            select(PolicyLifecycleState).where(
-                PolicyLifecycleState.user_id == user_id,
-                PolicyLifecycleState.policy_id == policy_id,
-                PolicyLifecycleState.context_id == context_id,
+            select(TemplateLifecycleState).where(
+                TemplateLifecycleState.template_id == template_id,
+                TemplateLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
         if state is None:
-            state = PolicyLifecycleState(
-                id=f"{user_id}:{policy_id}:{context_id}",
-                user_id=user_id,
-                policy_id=policy_id,
-                context_id=context_id,
-                data={},
-            )
-            session.add(state)
+            return False
 
         data = dict(state.data or {})
         data[ACTIVITY_KEY] = {"last_seen_at": _iso(now)}
@@ -286,8 +257,7 @@ async def mark_terminal_active(
 
 
 async def terminal_last_active_at(
-    user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
 ) -> datetime | None:
     """Return the latest persisted activity heartbeat for a terminal."""
@@ -296,14 +266,13 @@ async def terminal_last_active_at(
 
     context_id = normalize_context_id(context_id)
 
-    from terminals.models.policy import PolicyLifecycleState
+    from terminals.models.template import TemplateLifecycleState
 
     async with async_session() as session:
         state_row = await session.execute(
-            select(PolicyLifecycleState).where(
-                PolicyLifecycleState.user_id == user_id,
-                PolicyLifecycleState.policy_id == policy_id,
-                PolicyLifecycleState.context_id == context_id,
+            select(TemplateLifecycleState).where(
+                TemplateLifecycleState.template_id == template_id,
+                TemplateLifecycleState.context_id == context_id,
             )
         )
         state = state_row.scalar_one_or_none()
@@ -312,31 +281,31 @@ async def terminal_last_active_at(
         return _parse_iso(activity.get("last_seen_at"))
 
 
-async def get_lifecycle_data(policy_id: str) -> dict:
-    """Return policy-level lifecycle configuration."""
+async def get_lifecycle_data(template_id: str) -> dict:
+    """Return template-level lifecycle configuration."""
     if async_session is None:
         return {}
 
-    from terminals.models.policy import PolicyLifecycle
+    from terminals.models.template import TemplateLifecycle
 
     async with async_session() as session:
         row = await session.execute(
-            select(PolicyLifecycle).where(PolicyLifecycle.policy_id == policy_id)
+            select(TemplateLifecycle).where(TemplateLifecycle.template_id == template_id)
         )
         lifecycle = row.scalar_one_or_none()
         return deepcopy(lifecycle.data or {}) if lifecycle else {}
 
 
-async def upsert_lifecycle_data(policy_id: str, data: dict) -> dict:
-    """Create or update policy-level lifecycle configuration."""
+async def upsert_lifecycle_data(template_id: str, data: dict) -> dict:
+    """Create or update template-level lifecycle configuration."""
     if async_session is None:
         return {}
 
-    from terminals.models.policy import PolicyLifecycle
+    from terminals.models.template import TemplateLifecycle
 
     async with async_session() as session:
         row = await session.execute(
-            select(PolicyLifecycle).where(PolicyLifecycle.policy_id == policy_id)
+            select(TemplateLifecycle).where(TemplateLifecycle.template_id == template_id)
         )
         lifecycle = row.scalar_one_or_none()
         now = _utc_now()
@@ -345,9 +314,9 @@ async def upsert_lifecycle_data(policy_id: str, data: dict) -> dict:
             lifecycle.data = data
             lifecycle.updated_at = now
         else:
-            lifecycle = PolicyLifecycle(
-                id=policy_id,
-                policy_id=policy_id,
+            lifecycle = TemplateLifecycle(
+                id=template_id,
+                template_id=template_id,
                 data=data,
                 created_at=now,
                 updated_at=now,
@@ -356,3 +325,23 @@ async def upsert_lifecycle_data(policy_id: str, data: dict) -> dict:
 
         await session.commit()
         return deepcopy(lifecycle.data or {})
+
+
+async def ensure_terminal_state(template_id: str, context_id: str):
+    """Called under the instance lock before any persistent resources are created."""
+    from sqlalchemy.exc import IntegrityError
+    from terminals.models.template import TemplateLifecycleState
+    key = get_terminal_id(template_id, context_id)
+    async with async_session() as session:
+        row = await session.get(TemplateLifecycleState, key)
+        if row is None:
+            row = TemplateLifecycleState(id=key, template_id=template_id, context_id=context_id, data={})
+            session.add(row)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                row = await session.get(TemplateLifecycleState, key)
+                if row is None:
+                    raise
+        return row

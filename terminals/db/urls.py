@@ -3,6 +3,8 @@
 
 def async_database_url(url: str) -> str:
     """Return a URL suitable for SQLAlchemy's async engine."""
+    if url.startswith("sqlite://"):
+        return "sqlite+aiosqlite://" + url.removeprefix("sqlite://")
     if url.startswith("postgres://"):
         return "postgresql+asyncpg://" + url.removeprefix("postgres://")
     if url.startswith("postgresql://"):

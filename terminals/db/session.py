@@ -36,6 +36,20 @@ def init_db():
     migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
     alembic_cfg.set_main_option("script_location", str(migrations_dir))
 
+    from sqlalchemy import create_engine, inspect, text
+    from terminals.db.urls import sync_database_url
+    check_engine = create_engine(sync_database_url(settings.database_url))
+    try:
+        with check_engine.connect() as connection:
+            tables = inspect(connection).get_table_names()
+            if "alembic_version" in tables:
+                revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+                if revision != "004_templates":
+                    raise RuntimeError("Pre-0.4 database detected. Follow the manual 0.4 migration in CHANGELOG.md using a new database and separate storage; keep this database unchanged.")
+            elif tables:
+                raise RuntimeError("Existing unversioned database requires explicit migration")
+    finally:
+        check_engine.dispose()
     command.upgrade(alembic_cfg, "head")
 
 

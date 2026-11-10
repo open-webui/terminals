@@ -1,18 +1,11 @@
-"""Catch-all reverse proxy into terminal instances.
+"""Reverse proxy to the selected template's environment.
 
-Routing is based on the ``X-User-Id`` header — the caller (e.g. Open WebUI
-backend) sets this header and the proxy resolves / provisions the correct
-instance automatically.  The path structure mirrors open-terminal exactly
-(``/execute``, ``/files/list``, …) so the two are interchangeable.
-
-Named policy endpoints:
-  /p/{policy_id}/*  — provisions using the named policy config
+The trusted caller supplies the template and verified user/chat/model context.
+The template's stored scope determines the instance; paths mirror Open Terminal.
 """
 
 import asyncio
-import hmac
 import json
-import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote
@@ -20,7 +13,7 @@ from urllib.parse import quote
 import httpx
 import websockets
 from websockets.exceptions import InvalidHandshake
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, WebSocket
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from starlette.background import BackgroundTask
@@ -28,12 +21,11 @@ from starlette.background import BackgroundTask
 from terminals.backends.base import ProvisioningError
 from terminals.config import settings
 from terminals.utils.context import (
-    CONTEXT_HEADER,
+    CONTEXT_HEADER, TEMPLATE_HEADER, CHAT_HEADER, MODEL_HEADER, terminal_identity, get_terminal_id,
     DEFAULT_CONTEXT_ID,
-    normalize_context_id,
 )
-from terminals.utils.policy_specs import PolicyNotFoundError, resolve_policy_spec
-from terminals.routers.auth import validate_token, verify_api_key, verify_spec_access, verify_user_id
+from terminals.utils.template_specs import TemplateNotFoundError, resolve_template_spec
+from terminals.routers.auth import verify_proxy_user, verify_proxy_credentials, require_server_key
 
 router = APIRouter()
 
@@ -43,8 +35,6 @@ router = APIRouter()
 
 _proxy_clients: dict[tuple[str, int], httpx.AsyncClient] = {}
 
-# Active WebSocket connection counter (for stats endpoint)
-active_ws_connections: int = 0
 
 
 async def _get_proxy_client(host: str, port: int) -> httpx.AsyncClient:
@@ -81,34 +71,24 @@ async def close_proxy_client() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _client_ip(request) -> str:
-    """Extract client IP, respecting X-Forwarded-For."""
-    headers = getattr(request, "headers", {})
-    forwarded = headers.get("x-forwarded-for") if hasattr(headers, "get") else None
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    client = getattr(request, "client", None)
-    return client.host if client else ""
 
 
-def _user_agent(request) -> str:
-    headers = getattr(request, "headers", {})
-    return headers.get("user-agent", "") if hasattr(headers, "get") else ""
 
 
-def _request_id(request) -> Optional[str]:
-    return getattr(getattr(request, "state", None), "request_id", None)
 
 
-def _context_from_request(request: Request) -> str:
-    try:
-        return normalize_context_id(request.headers.get(CONTEXT_HEADER))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _context_from_websocket(ws: WebSocket, query_context_id: str) -> str:
-    return normalize_context_id(ws.headers.get(CONTEXT_HEADER) or query_context_id)
+async def _request_target(request, user_id):
+    template_id = request.headers.get(TEMPLATE_HEADER)
+    if not template_id:
+        raise HTTPException(400, "Missing X-Terminal-Template-Id")
+    if request.headers.get(CONTEXT_HEADER):
+        raise HTTPException(400, "Client-selected instance contexts are no longer supported")
+    spec = await _resolve_template_spec(template_id)
+    scope = (spec or {}).get("scope")
+    context, _ = terminal_identity(template_id, scope, user_id=user_id,
+                                   chat_id=request.headers.get(CHAT_HEADER),
+                                   model_id=request.headers.get(MODEL_HEADER))
+    return template_id, context
 
 
 # ---------------------------------------------------------------------------
@@ -119,49 +99,47 @@ def _context_from_websocket(ws: WebSocket, query_context_id: str) -> str:
 @dataclass
 class InstanceInfo:
     """Resolved terminal instance."""
-    instance_id: str
     host: str
     port: int
     api_key: str
 
 
-async def _touch_activity(backend, user_id: str, policy_id: str, context_id: str) -> None:
-    """Record terminal use; backends throttle the persisted write."""
+async def _touch_activity(backend, template_id, context_id):
     try:
-        await backend.touch_activity(user_id, policy_id=policy_id, context_id=context_id)
+        await backend.touch_activity(template_id, context_id=context_id)
     except Exception:
-        logger.debug("touch_activity failed for user {}", user_id)
+        logger.debug("Failed to persist activity for {}", template_id)
 
 
 async def _resolve_instance(
     request,
     user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
-    spec: Optional[dict] = None,
     existing_only: bool = False,
 ) -> InstanceInfo:
     """Return a running instance, auto-provisioning if needed."""
     backend = request.app.state.backend
     try:
         if existing_only:
-            info = await backend.get_terminal_info(user_id, policy_id=policy_id, context_id=context_id)
+            info = await backend.get_terminal_info(template_id=template_id, context_id=context_id)
             if info is None:
                 raise HTTPException(status_code=409, detail="Terminal instance is not running")
             return InstanceInfo(
-                instance_id=info["instance_id"], host=info["host"],
+                host=info["host"],
                 port=info["port"], api_key=info["api_key"],
             )
         info = await backend.ensure_terminal(
-            user_id, policy_id=policy_id, context_id=context_id, spec=spec
+            template_id=template_id, context_id=context_id
         )
+    except TemplateNotFoundError as exc:
+        raise HTTPException(404, "Template not found") from exc
     except ProvisioningError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if info is None:
         raise RuntimeError(f"Failed to provision terminal for user {user_id}")
-    await _touch_activity(backend, user_id, policy_id, context_id)
+    await _touch_activity(backend, template_id, context_id)
     return InstanceInfo(
-        instance_id=info["instance_id"],
         host=info["host"],
         port=info["port"],
         api_key=info["api_key"],
@@ -176,9 +154,9 @@ async def _resolve_instance(
 async def _proxy_request(
     request: Request, user_id: str, path: str,
     background_tasks: Optional[BackgroundTasks] = None,
-    policy_id: str = "default",
+    *,
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
-    spec: Optional[dict] = None,
 ) -> Response:
     """Forward an HTTP request to the user's terminal instance.
 
@@ -188,7 +166,7 @@ async def _proxy_request(
     # Inspecting machine health must never provision, wake, or keep an instance alive.
     existing_only = path.rstrip("/") == "system/info"
     instance = await _resolve_instance(
-        request, user_id, policy_id=policy_id, context_id=context_id, spec=spec,
+        request, user_id, template_id=template_id, context_id=context_id,
         existing_only=existing_only,
     )
 
@@ -200,7 +178,7 @@ async def _proxy_request(
     # Replace auth with the instance's own API key.
     headers["authorization"] = f"Bearer {instance.api_key}"
     # Remove hop-by-hop / routing headers.
-    for h in ("host", "transfer-encoding", "connection", "x-user-id", CONTEXT_HEADER.lower()):
+    for h in ("host", "transfer-encoding", "connection", "x-user-id", CONTEXT_HEADER.lower(), TEMPLATE_HEADER.lower(), CHAT_HEADER.lower(), MODEL_HEADER.lower()):
         headers.pop(h, None)
 
     raw_content_length = request.headers.get("content-length")
@@ -236,7 +214,7 @@ async def _proxy_request(
             )
             break
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            request.app.state.backend.invalidate_status(user_id, policy_id, context_id)
+            request.app.state.backend.invalidate_status(template_id, context_id)
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
@@ -244,9 +222,8 @@ async def _proxy_request(
                     instance = await _resolve_instance(
                         request,
                         user_id,
-                        policy_id=policy_id,
+                        template_id=template_id,
                         context_id=context_id,
-                        spec=spec,
                     )
                 except HTTPException:
                     raise
@@ -282,7 +259,7 @@ async def _proxy_request(
             )
         except (httpx.RemoteProtocolError, httpx.ReadError) as e:
             request.app.state.backend.invalidate_status(
-                user_id, policy_id, context_id
+                template_id, context_id
             )
             if attempt < max_retries - 1:
                 logger.debug(
@@ -295,9 +272,8 @@ async def _proxy_request(
                     instance = await _resolve_instance(
                         request,
                         user_id,
-                        policy_id=policy_id,
+                        template_id=template_id,
                         context_id=context_id,
-                        spec=spec,
                     )
                 except HTTPException:
                     raise
@@ -335,13 +311,8 @@ async def _proxy_request(
 
 
 # ---------------------------------------------------------------------------
-# OpenAPI spec passthrough (tool discovery — no X-User-Id required)
+# OpenAPI spec passthrough (tool discovery uses the same verified context as execution)
 # ---------------------------------------------------------------------------
-
-_SPEC_CACHE_TTL = 300  # seconds
-_spec_cache: dict[str, tuple[float, dict]] = {}  # key → (timestamp, spec)
-
-_SYSTEM_USER_ID = "system"
 
 # Max retries when waiting for a freshly provisioned container to become ready.
 _SPEC_FETCH_RETRIES = 10
@@ -397,147 +368,28 @@ def _strip_auth_from_spec(spec: dict) -> dict:
     return spec
 
 
-async def _get_cached_spec(
-    request: Request,
-    policy_id: str = "default",
-    spec: Optional[dict] = None,
-) -> dict:
-    """Return cached OpenAPI spec, fetching from a system instance if stale."""
-    now = time.monotonic()
-    cached = _spec_cache.get(policy_id)
-    if cached and (now - cached[0]) < _SPEC_CACHE_TTL:
-        return cached[1]
-
-    instance = await _resolve_instance(
-        request, _SYSTEM_USER_ID, policy_id=policy_id, spec=spec,
-    )
+async def _resolve_template_spec(template_id):
     try:
-        raw = await _fetch_spec_with_retry(instance)
-    except Exception:
-        request.app.state.backend.invalidate_status(_SYSTEM_USER_ID, policy_id)
-        raise
-    stripped = _strip_auth_from_spec(raw)
-    _spec_cache[policy_id] = (now, stripped)
-    return stripped
+        return await resolve_template_spec(template_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except TemplateNotFoundError as exc:
+        raise HTTPException(404, "Template not found") from exc
 
 
-@router.get(
-    "/openapi.json",
-    dependencies=[Depends(verify_spec_access)],
-)
-async def get_openapi_spec(request: Request):
-    """Return the open-terminal OpenAPI spec.
-
-    The spec is fetched from a running instance and cached for 5 minutes.
-    This endpoint does **not** require ``X-User-Id`` — it is used by
-    Open WebUI for tool discovery before any user context exists.
-    """
-    try:
-        spec = await _get_cached_spec(request)
-    except Exception as e:
-        logger.error("Failed to fetch OpenAPI spec from instance: {}", e)
-        return JSONResponse(
-            content={"error": "Failed to fetch OpenAPI spec from terminal instance"},
-            status_code=502,
-        )
-    return JSONResponse(content=spec)
+@router.get("/openapi.json")
+async def get_openapi_spec(request: Request, user_id: str = Depends(verify_proxy_user)):
+    template_id, context_id = await _request_target(request, user_id)
+    instance = await _resolve_instance(request, user_id, template_id, context_id)
+    return JSONResponse(content=_strip_auth_from_spec(await _fetch_spec_with_retry(instance)))
 
 
-# ---------------------------------------------------------------------------
-# Named policy proxy — /p/{policy_id}/{path}
-# ---------------------------------------------------------------------------
-
-_POLICY_CACHE_TTL = 60  # seconds
-_policy_cache: dict[str, tuple[float, tuple[str, dict | None]]] = {}
-
-
-def invalidate_policy_caches(policy_id: str) -> None:
-    """Discard cached policy data and tool specs after a policy change."""
-    _policy_cache.pop(policy_id, None)
-    _spec_cache.pop(policy_id, None)
-
-
-async def _resolve_policy_spec(policy_id: str) -> tuple[str, dict | None]:
-    """Look up a policy by ID (cached for 60s). Returns (policy_id, merged spec)."""
-    now = time.monotonic()
-    cached = _policy_cache.get(policy_id)
-    if cached and (now - cached[0]) < _POLICY_CACHE_TTL:
-        return cached[1]
-
-    try:
-        result = await resolve_policy_spec(policy_id)
-    except PolicyNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
-    _policy_cache[policy_id] = (now, result)
-    return result
-
-
-@router.get(
-    "/p/{policy_id}/openapi.json",
-    dependencies=[Depends(verify_spec_access)],
-)
-async def policy_openapi_spec(
-    policy_id: str,
-    request: Request,
-):
-    """Serve the OpenAPI spec via a named policy container (cached)."""
-    _id, spec = await _resolve_policy_spec(policy_id)
-
-    try:
-        spec_data = await _get_cached_spec(request, policy_id=_id, spec=spec)
-    except Exception as e:
-        logger.error("Failed to fetch OpenAPI spec from policy instance: {}", e)
-        return JSONResponse(
-            content={"error": "Failed to fetch OpenAPI spec"},
-            status_code=502,
-        )
-
-    return JSONResponse(content=spec_data)
-
-
-@router.api_route(
-    "/p/{policy_id}/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-)
-async def policy_proxy(
-    policy_id: str,
-    path: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_user_id: str = Depends(verify_user_id),
-):
-    """Proxy a request through a named policy endpoint."""
-    _id, spec = await _resolve_policy_spec(policy_id)
-    context_id = _context_from_request(request)
-    return await _proxy_request(
-        request, x_user_id, path, background_tasks,
-        policy_id=_id, context_id=context_id, spec=spec,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Header-based catch-all proxy — default endpoint (backward compat)
-# ---------------------------------------------------------------------------
-
-
-@router.api_route(
-    "/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-)
-async def proxy(
-    path: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_user_id: str = Depends(verify_user_id),
-):
-    """Reverse-proxy any request into the user's Open Terminal instance.
-
-    Uses settings.* defaults — no policy lookup.
-    """
-    context_id = _context_from_request(request)
-    return await _proxy_request(
-        request, x_user_id, path, background_tasks, context_id=context_id
-    )
+@router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+async def proxy(path: str, request: Request, background_tasks: BackgroundTasks,
+                x_user_id: str = Depends(verify_proxy_user)):
+    template_id, context_id = await _request_target(request, x_user_id)
+    return await _proxy_request(request, x_user_id, path, background_tasks,
+                                template_id=template_id, context_id=context_id)
 
 
 # ---------------------------------------------------------------------------
@@ -575,15 +427,10 @@ async def _validate_ws_auth(
         await ws.close(code=4001, reason="Auth failed")
         return None
 
-    verified_user_id = None
-    if settings.open_webui_url:
-        try:
-            verified_user_id = await validate_token(token)
-        except Exception:
-            await ws.close(code=4001, reason="Invalid token")
-            return None
-    elif settings.api_key and not hmac.compare_digest(token, settings.api_key):
-        await ws.close(code=4001, reason="Invalid API key")
+    try:
+        require_server_key(token)
+    except HTTPException:
+        await ws.close(code=4001, reason="Invalid server key")
         return None
 
     user_id = ws.headers.get("x-user-id") or user_id
@@ -591,57 +438,21 @@ async def _validate_ws_auth(
         await ws.close(code=4002, reason="Missing user_id")
         return None
 
-    if verified_user_id is not None and verified_user_id != user_id:
-        await ws.close(code=4003, reason="user_id does not match authenticated identity")
-        return None
-
     return user_id
 
 
-async def _ws_proxy_handler(
-    ws: WebSocket,
-    path: str,
-    user_id: str,
-    policy_id: str = "default",
-    context_id: str = DEFAULT_CONTEXT_ID,
-    spec: Optional[dict] = None,
-):
-    """Core WebSocket proxy logic, shared by default and policy routes.
-
-    The connection counter is maintained here with a try/finally around the
-    whole proxy body — early returns on resolve/connect failures previously
-    skipped the decrement, inflating the counter permanently.
-    """
-    global active_ws_connections
-    active_ws_connections += 1
-    try:
-        await _ws_proxy(
-            ws,
-            path,
-            user_id,
-            policy_id=policy_id,
-            context_id=context_id,
-            spec=spec,
-        )
-    finally:
-        active_ws_connections -= 1
-        try:
-            await ws.close()
-        except Exception:
-            pass
 
 
 async def _ws_proxy(
     ws: WebSocket,
     path: str,
     user_id: str,
-    policy_id: str = "default",
+    template_id: str,
     context_id: str = DEFAULT_CONTEXT_ID,
-    spec: Optional[dict] = None,
 ):
     try:
         instance = await _resolve_instance(
-            ws, user_id, policy_id=policy_id, context_id=context_id, spec=spec
+            ws, user_id, template_id=template_id, context_id=context_id
         )
     except Exception as e:
         logger.error("Failed to resolve instance for WS: {}", e)
@@ -668,7 +479,7 @@ async def _ws_proxy(
             OSError,
             InvalidHandshake,
         ) as e:
-            ws.app.state.backend.invalidate_status(user_id, policy_id, context_id)
+            ws.app.state.backend.invalidate_status(template_id, context_id)
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
@@ -676,9 +487,8 @@ async def _ws_proxy(
                     instance = await _resolve_instance(
                         ws,
                         user_id,
-                        policy_id=policy_id,
+                        template_id=template_id,
                         context_id=context_id,
-                        spec=spec,
                     )
                 except Exception as resolve_err:
                     logger.error("WS re-resolve for user {} failed: {}", user_id, resolve_err)
@@ -711,7 +521,7 @@ async def _ws_proxy(
                         if msg["type"] == "websocket.disconnect":
                             break
                         if msg.get("text") != '{"type":"ping"}':
-                            await _touch_activity(backend, user_id, policy_id, context_id)
+                            await _touch_activity(backend, template_id, context_id)
                         if "bytes" in msg and msg["bytes"]:
                             await upstream.send(msg["bytes"])
                         elif "text" in msg and msg["text"]:
@@ -722,7 +532,7 @@ async def _ws_proxy(
             async def _upstream_to_client():
                 try:
                     async for message in upstream:
-                        await _touch_activity(backend, user_id, policy_id, context_id)
+                        await _touch_activity(backend, template_id, context_id)
                         if isinstance(message, bytes):
                             await ws.send_bytes(message)
                         else:
@@ -744,74 +554,11 @@ async def _ws_proxy(
         logger.error("WebSocket terminal proxy error: {}", e)
 
 
-@router.websocket("/api/terminals/{session_id}")
-async def ws_terminal_proxy(
-    ws: WebSocket,
-    session_id: str,
-    user_id: str = Query(""),
-    context_id: str = Query(DEFAULT_CONTEXT_ID),
-):
-    """Default WebSocket terminal proxy (no policy)."""
-    effective_user = await _validate_ws_auth(ws, user_id)
-    if effective_user is None:
-        return
-    try:
-        context_id = _context_from_websocket(ws, context_id)
-    except ValueError as exc:
-        await ws.close(code=4004, reason=str(exc))
-        return
-    await _ws_proxy_handler(ws, f"api/terminals/{session_id}", effective_user, context_id=context_id)
-
-
-@router.websocket("/p/{policy_id}/api/terminals/{session_id}")
-async def ws_policy_terminal_proxy(
-    ws: WebSocket,
-    policy_id: str,
-    session_id: str,
-    user_id: str = Query(""),
-    context_id: str = Query(DEFAULT_CONTEXT_ID),
-):
-    """Policy-scoped WebSocket terminal proxy."""
-    effective_user = await _validate_ws_auth(ws, user_id)
-    if effective_user is None:
-        return
-
-    try:
-        _id, spec = await _resolve_policy_spec(policy_id)
-        context_id = _context_from_websocket(ws, context_id)
-    except HTTPException:
-        await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
-        return
-    except ValueError as exc:
-        await ws.close(code=4004, reason=str(exc))
-        return
-
-    await _ws_proxy_handler(
-        ws,
-        f"api/terminals/{session_id}",
-        effective_user,
-        policy_id=_id,
-        context_id=context_id,
-        spec=spec,
-    )
-
-
 @router.websocket("/{path:path}")
-@router.websocket("/p/{policy_id}/{path:path}")
-async def ws_proxy(
-    ws: WebSocket,
-    path: str,
-    policy_id: Optional[str] = None,
-    user_id: str = Query(""),
-    context_id: str = Query(DEFAULT_CONTEXT_ID),
-):
+async def ws_proxy(ws: WebSocket, path: str, user_id: str = Query("")):
     if path.startswith("browser/view/"):
         try:
-            verified_id = await verify_api_key(ws.headers.get("authorization"))
-            user_id = ws.headers.get("x-user-id", "")
-            if not user_id:
-                raise HTTPException(status_code=400, detail="Missing X-User-Id")
-            effective_user = await verify_user_id(verified_id, user_id)
+            effective_user = await verify_proxy_credentials(ws.headers.get("authorization"), ws.headers.get("x-user-id"))
         except HTTPException as exc:
             await ws.close(code=4001, reason=str(exc.detail))
             return
@@ -820,20 +567,33 @@ async def ws_proxy(
         effective_user = await _validate_ws_auth(ws, user_id)
         if effective_user is None:
             return
-
     try:
-        spec = None
-        if policy_id is not None:
-            policy_id, spec = await _resolve_policy_spec(policy_id)
-        context_id = _context_from_websocket(ws, context_id)
-    except HTTPException:
-        await ws.close(code=4004, reason=f"Policy '{policy_id}' not found")
+        template_id, context_id = await _request_target(ws, effective_user)
+    except HTTPException as exc:
+        await ws.close(code=4004, reason=str(exc.detail))
         return
-    except ValueError as exc:
-        await ws.close(code=4004, reason=str(exc))
-        return
+    key = get_terminal_id(template_id, context_id)
+    _instance_sockets.setdefault(key, set()).add(ws)
+    try:
+        await _ws_proxy(ws, path, effective_user, template_id=template_id, context_id=context_id)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        sockets = _instance_sockets.get(key)
+        if sockets is not None:
+            sockets.discard(ws)
+            if not sockets:
+                _instance_sockets.pop(key, None)
 
-    await _ws_proxy_handler(
-        ws, path, effective_user, policy_id=policy_id or "default",
-        context_id=context_id, spec=spec,
-    )
+
+_instance_sockets = {}
+
+
+async def close_instance_sessions(key):
+    for socket in list(_instance_sockets.pop(key, ())):
+        try:
+            await socket.close(code=1012, reason="Terminal restarted")
+        except Exception:
+            pass

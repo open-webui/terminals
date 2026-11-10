@@ -6,10 +6,10 @@ OpenShift restricted SCC does not support the full rootful agent devbox model. U
 
 ## What Works
 
-- One Open Terminal pod per user and policy.
+- One Open Terminal pod per template and user when `scope: "user"`.
 - Persistent user files through PVCs.
-- Policy-selected images, env vars, CPU, memory, storage, and idle timeout.
-- Refresh and scheduled reset of persisted terminal files.
+- Template-selected images, env vars, CPU, memory, storage, and idle timeout.
+- Restart and scheduled reset of persisted terminal files.
 - File browser, command execution, notebooks, and tools that are already in the image.
 
 ## What Does Not Work Under Restricted SCC
@@ -61,23 +61,27 @@ env:
 
 If you use the default SQLite database, mount a PVC at `/app/data`.
 
-## Example Policy
+## Example Template
 
 Use the OpenShift-compatible Open Terminal image:
 
 ```bash
-curl -X PUT https://terminals.example.com/api/v1/policies/openshift \
+curl -X POST https://terminals.example.com/api/v1/terminals/templates \
   -H "Authorization: Bearer $TERMINALS_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "image": "ghcr.io/open-webui/open-terminal:openshift",
-    "restricted": true,
-    "storage": "5Gi",
-    "storage_mode": "per-user",
-    "cpu_limit": "1",
-    "memory_limit": "1Gi",
-    "env": {
-      "OPEN_TERMINAL_FILE_BROWSER_ROOT": "home"
+    "id": "openshift",
+    "data": {
+      "name": "OpenShift",
+      "scope": "user",
+      "image": "ghcr.io/open-webui/open-terminal:openshift",
+      "restricted": true,
+      "storage": "5Gi",
+      "cpu_limit": "1",
+      "memory_limit": "1Gi",
+      "env": {
+        "OPEN_TERMINAL_FILE_BROWSER_ROOT": "home"
+      }
     }
   }'
 ```
@@ -102,7 +106,7 @@ Restricted mode applies these defaults unless you override them:
 }
 ```
 
-Do not set `OPEN_TERMINAL_ALLOWED_DOMAINS` in restricted policies. Use cluster network policy for egress control on OpenShift.
+Do not set `OPEN_TERMINAL_ALLOWED_DOMAINS` in restricted templates. Use cluster network policy for egress control on OpenShift.
 
 ## Custom Images
 
@@ -119,4 +123,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
 USER 1001
 ```
 
-Then point the policy `image` field at your built image and refresh affected terminals.
+Then point the template `image` field at your built image and restart affected environments.

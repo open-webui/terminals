@@ -13,9 +13,7 @@ from terminals.config import settings
 from terminals.db.session import close_db, init_db
 from terminals.logging import setup_logging
 from terminals.middleware import RequestIdMiddleware
-from terminals.routers.auth import close_auth_client
-from terminals.routers.lifecycle import router as lifecycle_router
-from terminals.routers.policy import router as policy_router
+from terminals.routers.terminals import router as terminals_router
 from terminals.routers.proxy import close_proxy_client, router as proxy_router
 
 
@@ -40,7 +38,6 @@ async def lifespan(app: FastAPI):
 
     await app.state.backend.stop_reaper()
     await close_proxy_client()
-    await close_auth_client()
     await app.state.backend.close()
     await close_db()
 
@@ -48,7 +45,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Terminals",
     description="Multi-tenant terminal orchestrator for Open Terminal.",
-    version="0.3.3",
+    version="0.4.0",
     lifespan=lifespan,
     openapi_url=None,  # Disable built-in OpenAPI; proxy router serves the terminal spec
 )
@@ -67,9 +64,8 @@ async def health():
     return {"status": True}
 
 
-# Policy CRUD must be before the catch-all proxy.
-app.include_router(policy_router)
-app.include_router(lifecycle_router)
+# Template CRUD must be before the catch-all proxy.
+app.include_router(terminals_router)
 
 FRONTEND_BUILD_DIR = Path(__file__).parent / "frontend" / "build"
 if FRONTEND_BUILD_DIR.exists():

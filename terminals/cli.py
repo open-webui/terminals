@@ -110,7 +110,10 @@ def upgrade(revision: str):
     from alembic import command
 
     click.echo(f"Upgrading database to {revision}…")
-    command.upgrade(_alembic_cfg(), revision)
+    try:
+        command.upgrade(_alembic_cfg(), revision)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("Done.")
 
 

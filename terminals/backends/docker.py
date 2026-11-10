@@ -14,6 +14,7 @@ import httpx
 
 from terminals.backends.base import Backend, parse_started_at
 from terminals.config import settings
+from terminals.utils.template_specs import resolve_template_spec
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
     CONTEXT_ID_ANNOTATION,
@@ -21,11 +22,13 @@ from terminals.utils.context import (
     DEFAULT_CONTEXT_ID,
     context_hash,
     normalize_context_id,
+    get_terminal_id,
 )
 from terminals.utils.env import build_terminal_env
 from terminals.utils.docker_mounts import parse_docker_mounts
 from terminals.utils.parsing import parse_cpu_nanos, parse_memory, parse_size
 from terminals.utils.network_profiles import resolve_network_profile
+from terminals.utils.image_pull import ensure_docker_image
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ _QUIET_LOG_LEVELS = {"WARNING", "ERROR", "CRITICAL"}
 
 
 class DockerBackend(Backend):
-    """Manage terminal instances as Docker containers."""
+    """Manage terminal environments as Docker containers."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -49,27 +52,16 @@ class DockerBackend(Backend):
         return self._docker
 
     @staticmethod
-    def _container_name(
-        policy_id: str, user_id: str, context_id: str = DEFAULT_CONTEXT_ID
-    ) -> str:
-        """Build a deterministic, DNS-safe container name (≤63 chars)."""
-        short = hashlib.sha256(user_id.encode()).hexdigest()[:12]
-        context_id = normalize_context_id(context_id)
-        if policy_id == "default":
-            name = f"{_CONTAINER_PREFIX}{short}"
-        else:
-            policy_slug = _DNS_SAFE.sub("-", policy_id.lower()).strip("-")[:20]
-            name = f"{_CONTAINER_PREFIX}{short}-{policy_slug}"
-        if context_id != DEFAULT_CONTEXT_ID:
-            name = f"{name}-{context_hash(context_id)}"
-        return name
+    def _container_name(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> str:
+        return f"terminal-{get_terminal_id(template_id, context_id)}"
 
     @staticmethod
-    def _home_dir(user_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> Path:
-        context_id = normalize_context_id(context_id)
-        if context_id == DEFAULT_CONTEXT_ID:
-            return Path(settings.docker_data_dir) / user_id
-        return Path(settings.docker_data_dir) / user_id / "contexts" / context_hash(context_id)
+    def _home_dir(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> Path:
+        root = Path(settings.docker_data_dir) / ".terminals"
+        home = root / get_terminal_id(template_id, context_id)
+        if root.is_symlink() or home.is_symlink():
+            raise ValueError("Terminal directories must not be symlinks")
+        return home
 
     # ------------------------------------------------------------------
     # Backend interface
@@ -77,8 +69,7 @@ class DockerBackend(Backend):
 
     async def provision(
         self,
-        user_id: str,
-        policy_id: str = "default",
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> dict:
@@ -86,10 +77,10 @@ class DockerBackend(Backend):
         docker = await self._get_docker()
         api_key = secrets.token_urlsafe(24)
         context_id = normalize_context_id(context_id)
-        instance_name = self._container_name(policy_id, user_id, context_id)
-        host_data_dir = str(self._home_dir(user_id, context_id).resolve())
+        workload_name = self._container_name(template_id, context_id)
+        host_data_dir = str(self._home_dir(template_id, context_id).resolve())
         if settings.docker_host_data_dir:
-            relative_home = self._home_dir(user_id, context_id).relative_to(settings.docker_data_dir)
+            relative_home = self._home_dir(template_id, context_id).relative_to(settings.docker_data_dir)
             host_data_dir = str(Path(settings.docker_host_data_dir) / relative_home)
         s = spec or {}
 
@@ -100,7 +91,7 @@ class DockerBackend(Backend):
         if len(networks) == 1:
             network_name = networks[0]
         elif networks:
-            key = f"{policy_id}:{user_id}:{context_id}".encode()
+            key = get_terminal_id(template_id, context_id).encode()
             network_name = networks[int(hashlib.sha256(key).hexdigest(), 16) % len(networks)]
 
         host_config: dict = {
@@ -127,7 +118,7 @@ class DockerBackend(Backend):
             host_config["StorageOpt"] = {"size": str(parse_size(s["storage"]))}
             log.info(
                 "Applying storage quota %s to writable layer of %s (/home/user not limited)",
-                s["storage"], instance_name,
+                s["storage"], workload_name,
             )
 
         # Egress filtering is handled inside the container (dnsmasq + ipset +
@@ -156,8 +147,8 @@ class DockerBackend(Backend):
             "ExposedPorts": {"8000/tcp": {}},
             "Labels": {
                 "app.kubernetes.io/managed-by": "terminals",
-                "openwebui.com/user-id": user_id,
-                "openwebui.com/policy": policy_id,
+                "openwebui.com/instance": get_terminal_id(template_id, context_id),
+                "openwebui.com/template": template_id,
                 CONTEXT_ID_ANNOTATION: context_id,
                 CONTEXT_TYPE_LABEL: (
                     DEFAULT_CONTEXT_ID
@@ -169,24 +160,25 @@ class DockerBackend(Backend):
         }
 
         log.info(
-            "Provisioning container %s for user %s (policy=%s, context=%s, network=%s)",
-            instance_name,
-            user_id,
-            policy_id,
+            "Provisioning container %s (template=%s, context=%s, network=%s)",
+            workload_name,
+            template_id,
             context_id,
             network_name or "default",
         )
+
+        await ensure_docker_image(docker, image)
 
         max_conflict_retries = 3
         container = None
         for attempt in range(max_conflict_retries + 1):
             try:
-                container = await docker.containers.run(config, name=instance_name)
+                container = await docker.containers.run(config, name=workload_name)
                 break
             except aiodocker.exceptions.DockerError as exc:
                 if exc.status == 409 and attempt < max_conflict_retries:
                     try:
-                        old = await docker.containers.get(instance_name)
+                        old = await docker.containers.get(workload_name)
                         old_info = await old.show()
                         if old_info.get("State", {}).get("Running"):
                             for entry in old_info.get("Config", {}).get("Env", []):
@@ -194,15 +186,15 @@ class DockerBackend(Backend):
                                     api_key = entry.split("=", 1)[1]
                                     break
                             container = old
-                            log.info("Adopted running container %s", instance_name)
+                            log.info("Adopted running container %s", workload_name)
                             break
                         log.warning(
                             "Container %s conflict (attempt %d/%d), removing stopped container",
-                            instance_name, attempt + 1, max_conflict_retries,
+                            workload_name, attempt + 1, max_conflict_retries,
                         )
                         await old.delete(force=True)
                     except aiodocker.exceptions.DockerError as adopt_exc:
-                        log.warning("Could not adopt/remove %s: %s", instance_name, adopt_exc)
+                        log.warning("Could not adopt/remove %s: %s", workload_name, adopt_exc)
                     await asyncio.sleep(1)
                     continue
                 # The storage driver may not support StorageOpt size quotas
@@ -214,17 +206,17 @@ class DockerBackend(Backend):
                     log.warning(
                         "Storage quota not supported by the Docker storage driver "
                         "for %s (%s), provisioning without a storage limit",
-                        instance_name, exc,
+                        workload_name, exc,
                     )
                     host_config.pop("StorageOpt", None)
                     continue
-                log.error("Failed to provision container for %s: %s", user_id, exc)
+                log.error("Failed to provision container for %s: %s", template_id, exc)
                 raise
 
         if container is None:
-            raise RuntimeError(f"Failed to provision or adopt container {instance_name}")
+            raise RuntimeError(f"Failed to provision or adopt container {workload_name}")
 
-        result = await self._extract_instance_info(container, instance_name, api_key)
+        result = await self._extract_instance_info(container, workload_name, api_key)
         await self._wait_until_ready(result, timeout=15)
         return result
 
@@ -238,28 +230,27 @@ class DockerBackend(Backend):
                 async with httpx.AsyncClient(timeout=3) as client:
                     resp = await client.get(url)
                     if resp.status_code == 200:
-                        log.info("Container %s is ready", instance["instance_name"])
+                        log.info("Container %s is ready", instance["workload_name"])
                         return
             except Exception:
                 pass
             await asyncio.sleep(0.5)
-        log.warning("Container %s did not become ready within %ds", instance["instance_name"], timeout)
+        log.warning("Container %s did not become ready within %ds", instance["workload_name"], timeout)
 
     async def _extract_instance_info(
         self,
         container,
-        instance_name: str,
+        workload_name: str,
         api_key: str,
     ) -> dict:
         """Read container metadata and return the instance info dict."""
         info = await container.show()
-        instance_id = info["Id"]
 
         # When using a custom Docker network, containers can reach each other
         # by name.  Otherwise, use the published port on the Docker host.
         network_mode = info.get("HostConfig", {}).get("NetworkMode", "default")
         if network_mode not in ("default", "bridge", "host", "none", ""):
-            host = instance_name
+            host = workload_name
             port = 8000
         else:
             port_bindings = (
@@ -274,8 +265,7 @@ class DockerBackend(Backend):
             host = settings.docker_host
 
         return {
-            "instance_id": instance_id,
-            "instance_name": instance_name,
+            "workload_name": workload_name,
             "api_key": api_key,
             "host": host,
             "port": port,
@@ -291,7 +281,7 @@ class DockerBackend(Backend):
 
         Called during startup to recover state after a restart without
         tearing down existing containers.  Uses Docker labels to identify
-        user_id and policy_id.  The API key is read from the container's
+        the template and context.  The API key is read from the container's
         ``OPEN_TERMINAL_API_KEY`` env var.
         """
         docker = await self._get_docker()
@@ -309,14 +299,15 @@ class DockerBackend(Backend):
             name = info.get("Name", "").lstrip("/")
             labels = info.get("Config", {}).get("Labels", {})
 
-            user_id = labels.get("openwebui.com/user-id")
-            policy_id = labels.get("openwebui.com/policy", "default")
-            context_id = normalize_context_id(labels.get(CONTEXT_ID_ANNOTATION))
-            if not user_id:
-                log.debug("Skipping container %s: no user-id label", name)
+            template_id = labels.get("openwebui.com/template")
+            context_id = labels.get(CONTEXT_ID_ANNOTATION)
+            if not template_id or not context_id:
+                log.warning("Skipping container %s without template/context metadata", name)
+                continue
+            if name != self._container_name(template_id, context_id):
                 continue
 
-            key = self._key(user_id, policy_id, context_id)
+            key = self._key(template_id, context_id)
 
             # Already tracked
             if key in self._instances:
@@ -329,11 +320,11 @@ class DockerBackend(Backend):
                     break
 
             instance_info = await self._extract_instance_info(container, name, api_key)
-            if policy_id not in adopted_specs:
-                adopted_specs[policy_id] = await self._adopted_spec(policy_id)
+            if template_id not in adopted_specs:
+                adopted_specs[template_id] = await resolve_template_spec(template_id)
             self._instances[key] = instance_info
-            self._specs[key] = adopted_specs[policy_id]
-            await self._seed_adopted_activity(key, user_id, policy_id, context_id)
+            self._specs[key] = adopted_specs[template_id]
+            self._instances[key].update(template_id=template_id, context_id=context_id)
             recovered += 1
             log.info("Reconciled container %s → %s:%s", name, instance_info["host"], instance_info["port"])
 
@@ -344,42 +335,15 @@ class DockerBackend(Backend):
     # Container lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self, instance_id: str) -> bool:
-        current = await self.status(instance_id)
-        if current == "running":
-            return True
-        if current == "stopped":
-            docker = await self._get_docker()
-            try:
-                container = await docker.containers.get(instance_id)
-                await container.start()
-                return True
-            except aiodocker.exceptions.DockerError as exc:
-                log.error("Failed to restart container %s: %s", instance_id, exc)
-                return False
-        return False  # missing
 
-    async def teardown(self, instance_id: str) -> None:
-        docker = await self._get_docker()
-        try:
-            container = await docker.containers.get(instance_id)
-            await container.stop(t=10)
-        except aiodocker.exceptions.DockerError:
-            pass
-        try:
-            container = await docker.containers.get(instance_id)
-            await container.delete(force=True)
-        except aiodocker.exceptions.DockerError:
-            log.warning("Could not remove container %s (may already be gone)", instance_id)
 
     async def reset(
         self,
-        user_id: str,
-        policy_id: str,
+        template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
         spec: dict | None = None,
     ) -> None:
-        home_dir = self._home_dir(user_id, context_id).resolve()
+        home_dir = self._home_dir(template_id, context_id).resolve()
         home_dir.mkdir(parents=True, exist_ok=True)
         for child in home_dir.iterdir():
             if child.is_dir() and not child.is_symlink():
@@ -387,44 +351,18 @@ class DockerBackend(Backend):
             else:
                 child.unlink(missing_ok=True)
 
-    async def list_user_data(self) -> list[str]:
-        root = Path(settings.docker_data_dir)
-        if not root.exists():
-            return []
-        return sorted(path.name for path in root.iterdir() if not path.is_symlink() and path.is_dir())
-
-    async def cleanup_user(self, user_id: str) -> int:
-        home_dir = self._home_dir(user_id)
-        root = Path(settings.docker_data_dir).resolve()
-        if Path(user_id).name != user_id or home_dir.is_symlink() or home_dir.resolve().parent != root:
-            raise ValueError("User workspace must be a direct directory under the data directory")
-
-        docker = await self._get_docker()
-        containers = await docker.containers.list(
-            all=True,
-            filters={"label": ["app.kubernetes.io/managed-by=terminals"]},
-        )
-        for container in containers:
-            info = await container.show()
-            if (info.get("Config", {}).get("Labels") or {}).get("openwebui.com/user-id") == user_id:
-                raise RuntimeError("Remove the user's terminal containers before cleanup")
-
-        if not home_dir.exists():
-            return 0
-        await asyncio.to_thread(shutil.rmtree, home_dir)
-        log.info("Deleted workspace for user=%s path=%s", user_id, home_dir)
-        return 1
-
-    async def status(self, instance_id: str) -> str:
+    async def status(self, name: str) -> str:
         docker = await self._get_docker()
         try:
-            container = await docker.containers.get(instance_id)
+            container = await docker.containers.get(name)
             info = await container.show()
             state = info.get("State", {})
             if state.get("Running"):
                 return "running"
             return "stopped"
-        except aiodocker.exceptions.DockerError:
+        except aiodocker.exceptions.DockerError as exc:
+            if exc.status != 404:
+                raise
             return "missing"
 
     async def close(self) -> None:

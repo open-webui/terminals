@@ -6,7 +6,10 @@ RUN pip install --no-cache-dir \
     kopf>=1.37.0 \
     kubernetes>=31.0.0
 
-COPY handler.py /app/handler.py
+COPY operator/handler.py /app/handler.py
+COPY terminals/utils/kubernetes_labels.py /app/terminals/utils/kubernetes_labels.py
+
+ENV PYTHONPATH=/app
 
 USER 65534:65534
 

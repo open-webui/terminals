@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 import kopf
 import kubernetes
 from kubernetes import client as k8s
+from terminals.utils.kubernetes_labels import template_label
 
 log = logging.getLogger(__name__)
 
@@ -272,7 +273,7 @@ def _owner_ref(body: dict) -> dict:
     }
 
 
-def _labels(name: str, user_id: str = "") -> dict[str, str]:
+def _labels(name: str, template_id: str = "") -> dict[str, str]:
     labels = {
         "app.kubernetes.io/name": "open-terminal",
         "app.kubernetes.io/instance": name,
@@ -280,8 +281,8 @@ def _labels(name: str, user_id: str = "") -> dict[str, str]:
         "app.kubernetes.io/part-of": "open-terminal",
         "openwebui.com/terminal": name,
     }
-    if user_id:
-        labels["openwebui.com/user-id"] = user_id
+    if template_id:
+        labels["openwebui.com/template"] = template_label(template_id)
     return labels
 
 
@@ -356,9 +357,9 @@ def _build_pod_manifest(
     api_key: str,
     owner_ref: dict,
     pvc_name: str | None,
-    user_id: str = "",
+    template_id: str = "",
 ) -> dict:
-    """Build the Pod manifest for an Open Terminal instance."""
+    """Build the Pod manifest for an Open Terminal environment."""
     image = spec.get("image", "ghcr.io/open-webui/open-terminal:latest")
     resources_spec = spec.get("resources", {})
     packages = spec.get("packages", [])
@@ -407,6 +408,8 @@ def _build_pod_manifest(
             "periodSeconds": 15,
         },
     }
+    if spec.get("imagePullPolicy"):
+        container["imagePullPolicy"] = spec["imagePullPolicy"]
 
     requests = resources_spec.get("requests", {})
     limits = resources_spec.get("limits", {})
@@ -425,7 +428,7 @@ def _build_pod_manifest(
     if container_security_context:
         container["securityContext"] = container_security_context
 
-    pod_labels = _labels(name, user_id)
+    pod_labels = _labels(name, template_id)
     pod_spec = {
         "containers": [container],
         "volumes": volumes,
@@ -461,7 +464,7 @@ def _build_pod_manifest(
 
 
 def _build_service_manifest(
-    name: str, namespace: str, owner_ref: dict, user_id: str = ""
+    name: str, namespace: str, owner_ref: dict, template_id: str = ""
 ) -> dict:
     return {
         "apiVersion": "v1",
@@ -469,7 +472,7 @@ def _build_service_manifest(
         "metadata": {
             "name": _resource_name(name, "svc"),
             "namespace": namespace,
-            "labels": _labels(name, user_id),
+            "labels": _labels(name, template_id),
             "ownerReferences": [owner_ref],
         },
         "spec": {
@@ -484,7 +487,7 @@ def _build_service_manifest(
 
 def _build_secret_manifest(
     name: str, namespace: str, api_key: str, owner_ref: dict,
-    user_id: str = "",
+    template_id: str = "",
 ) -> dict:
     return {
         "apiVersion": "v1",
@@ -492,7 +495,7 @@ def _build_secret_manifest(
         "metadata": {
             "name": _resource_name(name, "apikey"),
             "namespace": namespace,
-            "labels": _labels(name, user_id),
+            "labels": _labels(name, template_id),
             "ownerReferences": [owner_ref],
         },
         "type": "Opaque",
@@ -504,7 +507,7 @@ def _build_secret_manifest(
 
 def _build_pvc_manifest(
     name: str, namespace: str, spec: dict, owner_ref: dict,
-    user_id: str = "",
+    template_id: str = "",
 ) -> dict:
     persistence = spec.get("persistence", {})
     size = persistence.get("size", "1Gi")
@@ -519,7 +522,7 @@ def _build_pvc_manifest(
         "metadata": {
             "name": _resource_name(name, "pvc"),
             "namespace": namespace,
-            "labels": _labels(name, user_id),
+            "labels": _labels(name, template_id),
         },
         "spec": {
             "accessModes": ["ReadWriteOnce"],
@@ -556,9 +559,9 @@ def _raise_provisioning_error(error, patch):
 @kopf.on.create(GROUP, VERSION, PLURAL)
 async def on_create(body, spec, name, namespace, patch, **_):
     """Create all child resources for a new Terminal CR."""
-    log.info("Creating terminal %s/%s for user %s", namespace, name, spec.get("userId"))
+    log.info("Creating terminal %s/%s for user %s", namespace, name, spec.get("templateId"))
 
-    user_id = spec.get("userId", "")
+    template_id = spec.get("templateId", "")
     owner_ref = _owner_ref(body)
     api_key = _generate_api_key()
     core_v1 = k8s.CoreV1Api()
@@ -575,7 +578,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
     pvc_name = None
     if persistence.get("enabled", True):
         pvc_name = _resource_name(name, "pvc")
-        pvc_manifest = _build_pvc_manifest(name, namespace, spec, owner_ref, user_id=user_id)
+        pvc_manifest = _build_pvc_manifest(name, namespace, spec, owner_ref, template_id=template_id)
         try:
             core_v1.create_namespaced_persistent_volume_claim(
                 namespace=namespace, body=pvc_manifest
@@ -589,7 +592,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
 
     # -- Secret (API key)
     secret_name = _resource_name(name, "apikey")
-    secret_manifest = _build_secret_manifest(name, namespace, api_key, owner_ref, user_id=user_id)
+    secret_manifest = _build_secret_manifest(name, namespace, api_key, owner_ref, template_id=template_id)
     try:
         core_v1.create_namespaced_secret(namespace=namespace, body=secret_manifest)
         log.info("Created Secret %s/%s", namespace, secret_name)
@@ -603,7 +606,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
 
     # -- Service
     svc_name = _resource_name(name, "svc")
-    svc_manifest = _build_service_manifest(name, namespace, owner_ref, user_id=user_id)
+    svc_manifest = _build_service_manifest(name, namespace, owner_ref, template_id=template_id)
     try:
         core_v1.create_namespaced_service(namespace=namespace, body=svc_manifest)
         log.info("Created Service %s/%s", namespace, svc_name)
@@ -616,7 +619,7 @@ async def on_create(body, spec, name, namespace, patch, **_):
     # -- Pod
     pod_name = _resource_name(name, "pod")
     pod_manifest = _build_pod_manifest(
-        name, namespace, spec, api_key, owner_ref, pvc_name, user_id=user_id
+        name, namespace, spec, api_key, owner_ref, pvc_name, template_id=template_id
     )
     try:
         core_v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
