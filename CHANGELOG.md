@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-10
+
+> [!WARNING]
+> **Upgrading from 0.3.x or earlier still requires the manual migration.** 0.4.1 has the same database schema, storage paths, and saved terminal selections as 0.4.0, so replacing the Terminals image alone does not upgrade a 0.3.x installation and **there is no automatic migration**. Back up both databases and all terminal files, then follow the [0.4.0 migration steps](#moving-to-040-manually). From 0.4.0, replace the image as usual.
+
+> [!WARNING]
+> **Restart now starts the workspace again.** In 0.4.0, Restart only stopped a workspace, which started again on its next use. Restart now stops it and starts it again right away. If a script or runbook uses `POST /restart` to stop a workspace, for example before copying files, change it to the new `POST /stop`.
+
+**Requires Open WebUI 0.13.4 or later.** Start and Stop appear in Open WebUI versions that include them.
+
+### Added
+
+- **Start and stop a workspace.** `POST /api/v1/terminals/templates/{id}/stop` stops a workspace and keeps its files; it starts again on its next use. `POST /api/v1/terminals/templates/{id}/start` starts it, creating it if needed. Both take the same `user_id`, `chat_id`, and `model_id` body as restart.
+- **The built-in admin UI shows Start, Stop, and Restart.** A running environment has Restart and Stop; a stopped one has Start.
+
+### Changed
+
+- **Restart starts the workspace again right away**, with the current template settings. A new image, resource limit, or Open Terminal setup script takes effect without waiting for the workspace to be used.
+
 ## [0.4.0] - 2026-11-10 — BREAKING CHANGES
 
 > [!WARNING]
@@ -118,7 +137,7 @@ This route uses a new Terminals database. It keeps the files and settings you tr
 
 4. **Recreate templates and access.** Use **New terminal** in WebUI or the template API. Copy the old image, environment variables, resource limits, storage, network, and security settings. Preserve server defaults and who can access each connection and template. Creating a template through the Terminals admin API does not create WebUI permissions. Record the new IDs. Keep scheduled resets disabled until the files are copied and checked.
 
-5. **Prepare each new workspace.** Open it with the correct existing user, saved chat, or model and run a harmless command. This creates its storage and tracking record. For Chat scope, select the template on the existing chat; making a new chat changes which workspace it uses. Get the instance `id` from `GET /api/v1/terminals/templates/{id}/instance`, supplying `user_id` and the relevant `chat_id` or `model_id`. This status request alone does not create a workspace. Record its storage mount. Use **Restart** to stop the terminal while keeping files, confirm it has stopped, block reconnections, and stop the new Terminals service during copying. Do not use Reset or Delete here.
+5. **Prepare each new workspace.** Open it with the correct existing user, saved chat, or model and run a harmless command. This creates its storage and tracking record. For Chat scope, select the template on the existing chat; making a new chat changes which workspace it uses. Get the instance `id` from `GET /api/v1/terminals/templates/{id}/instance`, supplying `user_id` and the relevant `chat_id` or `model_id`. This status request alone does not create a workspace. Record its storage mount. Use **Stop** (on 0.4.0, **Restart**) to stop the terminal while keeping files, confirm it has stopped, block reconnections, and stop the new Terminals service during copying. Do not use Reset or Delete here.
 
 6. **Copy and check files.** On Docker, copy the old home contents into `.terminals/<instance-id>` under the new data directory. Use the matching Docker-host directory if a host path override is configured. Include hidden files and preserve ownership, permissions, and symlinks. On Kubernetes, use temporary pods to copy between the old and new PVCs, with the source mounted read-only and the PVC access rules respected. Shared PVCs use `.terminals/<instance-id>`; for dedicated PVCs, use the new terminal's recorded home mount. Copy extra persistent mounts where needed. Compare file contents or checksums and file metadata before starting the terminal again.
 
