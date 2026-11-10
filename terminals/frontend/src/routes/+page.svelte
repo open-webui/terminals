@@ -10,7 +10,7 @@
 	let lifecycle = $state('{}');
 	const input = 'w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-gray-700';
 	const button = 'rounded-lg px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50';
-	async function api(path: string, method = 'GET', body?: unknown) {
+	async function api(path: string, method = 'GET', body: unknown = undefined) {
 		const response = await fetch(`/api/v1/terminals${path}`, {method, headers: {Authorization: `Bearer ${token}`, ...(body !== undefined ? {'Content-Type': 'application/json'} : {})}, ...(body !== undefined ? {body: JSON.stringify(body)} : {})});
 		const data = await response.json();
 		if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Request failed');
