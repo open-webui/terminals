@@ -550,6 +550,13 @@ async def _ws_proxy(
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Open WebUI decides from the close code whether to reconnect; 1005 and 1006 cannot be sent.
+            if upstream.close_code not in (None, 1005, 1006):
+                try:
+                    await ws.close(code=upstream.close_code, reason=upstream.close_reason)
+                except Exception:
+                    pass
     except Exception as e:
         logger.error("WebSocket terminal proxy error: {}", e)
 
