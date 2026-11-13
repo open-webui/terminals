@@ -14,7 +14,7 @@ import httpx
 
 from terminals.backends.base import Backend, parse_started_at
 from terminals.config import settings
-from terminals.utils.template_specs import resolve_template_spec
+from terminals.utils.template_specs import TemplateNotFoundError, resolve_template_spec
 from terminals.utils.context import (
     CONTEXT_HASH_LABEL,
     CONTEXT_ID_ANNOTATION,
@@ -319,9 +319,13 @@ class DockerBackend(Backend):
                     api_key = entry.split("=", 1)[1]
                     break
 
-            instance_info = await self._extract_instance_info(container, name, api_key)
             if template_id not in adopted_specs:
-                adopted_specs[template_id] = await resolve_template_spec(template_id)
+                try:
+                    adopted_specs[template_id] = await resolve_template_spec(template_id)
+                except TemplateNotFoundError:
+                    log.warning("Skipping container %s with unknown template %s", name, template_id)
+                    continue
+            instance_info = await self._extract_instance_info(container, name, api_key)
             self._instances[key] = instance_info
             self._specs[key] = adopted_specs[template_id]
             self._instances[key].update(template_id=template_id, context_id=context_id)
