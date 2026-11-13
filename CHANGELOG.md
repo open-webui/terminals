@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-13
+
+> [!WARNING]
+> Upgrading from 0.3.x or earlier still requires the [manual migration](#moving-to-040-manually). Updating the image alone is not enough. From 0.4.0 or 0.4.1, update the image as usual.
+
+### Fixed
+
+- Fixed Terminals failing to start when it finds a running Docker terminal whose template is missing from its database, such as one belonging to another installation on the same host. It now skips that terminal without stopping it and continues recovering the other workspaces.
+- Fixed a shell incorrectly showing "Session no longer available" when the same chat is opened in another browser window or device. Open WebUI now receives the information it needs to retry the connection and reconnect to the existing shell after the first window closes, instead of offering only "Start new terminal".
+
 ## [0.4.1] - 2026-11-10
 
 > [!WARNING]
