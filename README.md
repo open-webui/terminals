@@ -2,6 +2,8 @@
 
 Run [Open Terminal](https://github.com/open-webui/open-terminal) environments from shared templates. Terminals starts containers on demand, routes requests by template and scope, and manages persistent files and idle cleanup on Docker or Kubernetes.
 
+**Requires Open WebUI 0.13.4 or later.**
+
 ```text
 Open WebUI → Terminals → Open Terminal containers
 ```
