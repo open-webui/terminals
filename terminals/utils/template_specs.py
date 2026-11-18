@@ -3,6 +3,7 @@
 from terminals.config import settings
 from terminals.db.session import async_session
 from terminals.utils.context import validate_identifier
+from terminals.utils.parsing import parse_cpu_nanos, parse_size
 
 
 class TemplateNotFoundError(Exception):
@@ -17,7 +18,19 @@ def merge_template_defaults(template_data: dict) -> dict:
         image = settings.effective_kubernetes_image
     if image:
         defaults["image"] = image
-    return {**defaults, **{k: v for k, v in template_data.items() if v is not None}}
+    result = {**defaults, **{k: v for k, v in template_data.items() if v is not None}}
+    # Enforce current caps at provisioning time, including for older templates.
+    for field, cap, parse in (
+        ("cpu_limit", settings.max_cpu, parse_cpu_nanos),
+        ("memory_limit", settings.max_memory, parse_size),
+    ):
+        if cap:
+            ceiling = parse(cap)
+            if ceiling <= 0:
+                raise ValueError(f"{field} cap must be positive")
+            if not result.get(field) or not 0 < parse(result[field]) <= ceiling:
+                result[field] = cap
+    return result
 
 
 async def resolve_template_spec(template_id: str) -> dict:
