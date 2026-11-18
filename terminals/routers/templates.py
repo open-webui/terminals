@@ -19,7 +19,7 @@ from terminals.utils.kubernetes_security import (
     restricted_enabled,
     restricted_env_errors,
 )
-from terminals.utils.parsing import parse_size
+from terminals.utils.parsing import parse_cpu_nanos, parse_size
 from terminals.utils.network_profiles import resolve_network_profile
 
 router = APIRouter(tags=["templates"], dependencies=[Depends(verify_admin_api_key)])
@@ -109,7 +109,7 @@ def _clamp_template(data: dict) -> dict:
     # Clamp CPU
     if settings.max_cpu and "cpu_limit" in result:
         try:
-            if float(result["cpu_limit"]) > float(settings.max_cpu):
+            if parse_cpu_nanos(result["cpu_limit"]) > parse_cpu_nanos(settings.max_cpu):
                 result["cpu_limit"] = settings.max_cpu
         except (ValueError, TypeError):
             pass
