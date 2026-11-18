@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-18
+
+> [!WARNING]
+> Upgrading from 0.3.x or earlier still requires the [manual migration](#moving-to-040-manually). Updating the image alone is not enough. From an earlier 0.4.x release, update the image as usual.
+
+**Requires Open WebUI 0.13.4 or later**, now also stated at the top of the README.
+
+### Fixed
+
+- Fixed workspaces starting without the administrator's CPU and memory caps when template limits were blank or zero. Previously saved templates now also respect the current caps when a workspace is created, even if they were saved before the caps were set or lowered. Lower template limits are kept. Restart existing workspaces to apply these limits.
+- Fixed templates exceeding fractional CPU caps, such as a template requesting one CPU when the administrator allows only half a CPU.
+
 ## [0.4.2] - 2026-11-13
 
 > [!WARNING]
