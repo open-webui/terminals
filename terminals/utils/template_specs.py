@@ -3,7 +3,7 @@
 from terminals.config import settings
 from terminals.db.session import async_session
 from terminals.utils.context import validate_identifier
-from terminals.utils.parsing import parse_cpu_nanos, parse_size
+from terminals.utils.parsing import parse_cpu_nanos, parse_kubernetes_quantity, parse_size
 
 
 class TemplateNotFoundError(Exception):
@@ -14,15 +14,21 @@ def merge_template_defaults(template_data: dict) -> dict:
     """Merge env var defaults with template overrides."""
     defaults = {}
     image = settings.image
+    parse_storage = parse_size
     if settings.backend in ("kubernetes", "kubernetes-operator"):
         image = settings.effective_kubernetes_image
+        defaults["storage"] = settings.kubernetes_storage_size
+        parse_storage = parse_kubernetes_quantity
     if image:
         defaults["image"] = image
     result = {**defaults, **{k: v for k, v in template_data.items() if v is not None}}
+    # An empty Kubernetes storage size selects ephemeral storage (no PVC request).
+    storage_cap = settings.max_storage if settings.backend == "docker" or result.get("storage") else ""
     # Enforce current caps at provisioning time, including for older templates.
     for field, cap, parse in (
         ("cpu_limit", settings.max_cpu, parse_cpu_nanos),
         ("memory_limit", settings.max_memory, parse_size),
+        ("storage", storage_cap, parse_storage),
     ):
         if cap:
             ceiling = parse(cap)
