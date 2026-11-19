@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-11-19
+
+> [!WARNING]
+> Upgrading from 0.3.x or earlier still requires the [manual migration](#moving-to-040-manually). Updating the image alone is not enough. From an earlier 0.4.x release, update the image as usual.
+
+### Fixed
+
+- Fixed new Docker terminals skipping the administrator's storage cap when a template has no storage limit or was saved with a higher limit. New terminals now request the current cap, while smaller template limits are kept. Docker still needs host support to apply the limit and may run without it if it cannot apply it. Saved files in the home folder are not covered by this limit.
+- Fixed new Kubernetes storage exceeding the administrator's current cap when its size comes from the server default or an older saved template. This applies to both Kubernetes deployment modes. Smaller sizes are kept, and setups using only temporary storage stay that way. Existing storage is not resized.
+
 ## [0.4.3] - 2026-11-18
 
 > [!WARNING]
