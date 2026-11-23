@@ -55,7 +55,7 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                   description: >-
                     Optional PodTemplate-style metadata/spec overrides merged
-                    into the generated terminal pod. Terminals-owned identity,
+                    into the generated machine pod. Operator-managed identity,
                     owner reference, auth, and service wiring remain controlled
                     by the operator.
                 resources:

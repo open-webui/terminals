@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 import kopf
 import kubernetes
 from kubernetes import client as k8s
-from terminals.utils.kubernetes_labels import template_label
+from machines.utils.kubernetes_labels import template_label
 
 log = logging.getLogger(__name__)
 
@@ -58,14 +58,18 @@ RESTRICTED_CONTAINER_SECURITY_CONTEXT = {
 # ---------------------------------------------------------------------------
 
 
+def _setting(name: str, default: str = "") -> str:
+    return os.environ.get(f"MACHINES_{name}", os.environ.get(f"TERMINALS_{name}", default))
+
+
 def _configured_log_level() -> int:
-    raw = os.environ.get("TERMINALS_LOG_LEVEL", "INFO")
+    raw = _setting("LOG_LEVEL", "INFO")
     level = raw.strip().upper()
     if level in _LOG_LEVELS:
         return _LOG_LEVELS[level]
 
     log.warning(
-        "Invalid TERMINALS_LOG_LEVEL=%r; using INFO. Expected one of: %s",
+        "Invalid MACHINES_LOG_LEVEL=%r; using INFO. Expected one of: %s",
         raw,
         ", ".join(_LOG_LEVELS),
     )
@@ -315,20 +319,20 @@ def _set_condition(
 
 
 def _parse_node_selector() -> dict[str, str] | None:
-    raw = os.environ.get("TERMINALS_KUBERNETES_NODE_SELECTOR", "").strip()
+    raw = _setting("KUBERNETES_NODE_SELECTOR").strip()
     if not raw:
         return None
     if raw.startswith("{"):
         data = json.loads(raw)
         if not isinstance(data, dict):
-            raise ValueError("TERMINALS_KUBERNETES_NODE_SELECTOR must be an object")
+            raise ValueError("MACHINES_KUBERNETES_NODE_SELECTOR must be an object")
         return {str(key): str(value) for key, value in data.items()}
 
     selector = {}
     for pair in raw.split(","):
         if "=" not in pair:
             raise ValueError(
-                "TERMINALS_KUBERNETES_NODE_SELECTOR must be JSON or k=v pairs"
+                "MACHINES_KUBERNETES_NODE_SELECTOR must be JSON or k=v pairs"
             )
         key, value = pair.split("=", 1)
         selector[key.strip()] = value.strip()
@@ -336,12 +340,12 @@ def _parse_node_selector() -> dict[str, str] | None:
 
 
 def _parse_tolerations() -> list[dict] | None:
-    raw = os.environ.get("TERMINALS_KUBERNETES_TOLERATIONS", "").strip()
+    raw = _setting("KUBERNETES_TOLERATIONS").strip()
     if not raw:
         return None
     data = json.loads(raw)
     if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
-        raise ValueError("TERMINALS_KUBERNETES_TOLERATIONS must be a JSON array")
+        raise ValueError("MACHINES_KUBERNETES_TOLERATIONS must be a JSON array")
     return data
 
 
@@ -543,9 +547,9 @@ def _raise_provisioning_error(error, patch):
     if error.status != 403:
         raise error
     message = (
-        "Terminal capacity exhausted, please retry later"
+        "Machine capacity exhausted, please retry later"
         if "exceeded quota" in (error.body or "").lower()
-        else "Terminal provisioning forbidden by Kubernetes"
+        else "Machine provisioning forbidden by Kubernetes"
     )
     log.error("Terminal resource creation rejected: %s", error)
     patch.status["phase"] = "Error"
@@ -559,7 +563,7 @@ def _raise_provisioning_error(error, patch):
 @kopf.on.create(GROUP, VERSION, PLURAL)
 async def on_create(body, spec, name, namespace, patch, **_):
     """Create all child resources for a new Terminal CR."""
-    log.info("Creating terminal %s/%s for user %s", namespace, name, spec.get("templateId"))
+    log.info("Creating machine %s/%s for template %s", namespace, name, spec.get("templateId"))
 
     template_id = spec.get("templateId", "")
     owner_ref = _owner_ref(body)

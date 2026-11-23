@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     kubernetes>=31.0.0
 
 COPY operator/handler.py /app/handler.py
-COPY terminals/utils/kubernetes_labels.py /app/terminals/utils/kubernetes_labels.py
+COPY machines/utils/kubernetes_labels.py /app/machines/utils/kubernetes_labels.py
 
 ENV PYTHONPATH=/app
 

@@ -2,10 +2,10 @@ FROM node:22-slim AS frontend
 
 WORKDIR /frontend
 
-COPY terminals/frontend/package.json terminals/frontend/package-lock.json ./
+COPY machines/frontend/package.json machines/frontend/package-lock.json ./
 RUN npm ci
 
-COPY terminals/frontend/ ./
+COPY machines/frontend/ ./
 RUN npm run build
 
 
@@ -13,15 +13,14 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV TERMINALS_DATABASE_URL=sqlite+aiosqlite:////app/data/terminals.db
-ENV TERMINALS_DOCKER_DATA_DIR=/app/data/terminals
 
 WORKDIR /app
 
 COPY . .
-COPY --from=frontend /frontend/build /app/terminals/frontend/build
+COPY --from=frontend /frontend/build /app/machines/frontend/build
 
-RUN pip install --no-cache-dir . \
+# Run the package from /app so its default data directory is /app/data.
+RUN pip install --no-cache-dir --editable . \
     && mkdir -p /app/data \
     && chgrp -R 0 /app/data \
     && chmod -R g=u /app/data

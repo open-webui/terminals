@@ -1,7 +1,7 @@
 [project]
 name = "terminals"
-version = "0.4.4"
-description = "Multi-tenant terminal orchestrator for Open Terminal."
+version = "0.5.0"
+description = "Multi-tenant machine orchestration."
 readme = "README.md"
 authors = [
     { name = "Timothy Jaeryang Baek", email = "tim@openwebui.com" }
@@ -26,18 +26,18 @@ dependencies = [
 ]
 
 [project.scripts]
-terminals = "terminals.cli:main"
+terminals = "machines.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["terminals"]
 include = [
-    "terminals/**/*.py",
-    "terminals/alembic.ini",
-    "terminals/migrations/**/*",
-    "terminals/frontend/build/**/*",
+    "machines/**/*.py",
+    "terminals/*.py",
+    "machines/alembic.ini",
+    "machines/migrations/**/*",
+    "machines/frontend/build/**/*",
 ]
-artifacts = ["terminals/frontend/build/**/*"]
+artifacts = ["machines/frontend/build/**/*"]

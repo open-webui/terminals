@@ -6,6 +6,6 @@ __pycache__
 .ruff_cache
 .mypy_cache
 
-terminals/frontend/node_modules
-terminals/frontend/.svelte-kit
-terminals/frontend/build
+machines/frontend/node_modules
+machines/frontend/.svelte-kit
+machines/frontend/build

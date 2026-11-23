@@ -1,0 +1,792 @@
+"""Kubernetes Operator backend — manages machines through Terminal custom resources.
+
+Instead of creating Pods/Services directly, this backend creates and manages
+``Terminal`` custom resources.  A separate Kopf-based operator watches these
+CRs and reconciles the underlying Pods, Services, Secrets, and PVCs.
+
+The operator generates API keys and stores them in Kubernetes Secrets.
+This backend reads the key from the Secret referenced in ``status.apiKeySecret``.
+"""
+
+import asyncio
+import base64
+import logging
+import time
+from typing import Optional
+
+from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client import ApiClient
+
+from machines.backends.base import Backend, ProvisioningError, parse_started_at
+from machines.config import settings
+from machines.utils.kubernetes_labels import template_label
+from machines.utils.network_profiles import resolve_network_profile
+from machines.utils.context import (
+    CONTEXT_HASH_LABEL,
+    CONTEXT_ID_ANNOTATION,
+    CONTEXT_TYPE_LABEL,
+    DEFAULT_CONTEXT_ID,
+    context_hash,
+    normalize_context_id,
+    get_terminal_id,
+)
+from machines.utils.env import build_terminal_env
+from machines.utils.kubernetes_security import (
+    container_security_context,
+    deep_merge,
+    pod_security_context,
+    restricted_enabled,
+)
+from machines.utils.kubernetes_scheduling import node_selector, tolerations
+from machines.utils.template_lifecycle import mark_terminal_active
+from machines.utils.image_pull import pull_policy
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_ID_ANNOTATION = "openwebui.com/template-id"
+
+
+def _sanitize_name(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> str:
+    return f"terminal-{get_terminal_id(template_id, context_id)}"
+
+
+class KubernetesOperatorBackend(Backend):
+    """Manage terminal environments via Terminal CRDs.
+
+    The backend creates/deletes ``Terminal`` custom resources in the
+    configured namespace.  A Kopf operator running in the cluster watches
+    these resources and manages the actual Pods, Services, Secrets, and PVCs.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._api_client: Optional[ApiClient] = None
+        self._last_activity_status_updated_at: dict[str, float] = {}
+
+    async def _ensure_client(self) -> ApiClient:
+        if self._api_client is None:
+            if settings.kubernetes_kubeconfig:
+                await config.load_kube_config(
+                    config_file=settings.kubernetes_kubeconfig
+                )
+            else:
+                config.load_incluster_config()
+            self._api_client = ApiClient()
+        return self._api_client
+
+    @property
+    def _group(self) -> str:
+        return settings.kubernetes_crd_group
+
+    @property
+    def _version(self) -> str:
+        return settings.kubernetes_crd_version
+
+    @property
+    def _plural(self) -> str:
+        return "terminals"
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _read_api_key_from_secret(self, secret_name: str) -> Optional[str]:
+        """Read the API key from a Kubernetes Secret."""
+        api_client = await self._ensure_client()
+        core = client.CoreV1Api(api_client)
+        ns = settings.kubernetes_namespace
+        try:
+            secret = await core.read_namespaced_secret(secret_name, ns)
+            raw = secret.data.get("api-key", "")
+            return base64.b64decode(raw).decode() if raw else None
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    async def _get_terminal_cr(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> Optional[dict]:
+        """Get the Terminal CR for a template/context, or None if it doesn't exist."""
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        name = _sanitize_name(template_id, context_id)
+        ns = settings.kubernetes_namespace
+        try:
+            cr = await custom.get_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                name=name,
+            )
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+        status = cr.get("status") or {}
+        if status.get("phase") == "Running" and status.get("podName"):
+            try:
+                await client.CoreV1Api(api_client).read_namespaced_pod(status["podName"], ns)
+            except client.exceptions.ApiException as e:
+                if e.status != 404:
+                    raise
+                # A missed deletion event must still use the existing recovery path.
+                status["phase"] = "Error"
+        return cr
+
+    async def _create_terminal_cr(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
+    ) -> dict:
+        """Create a Terminal CR for a template/context and return it."""
+        profile = resolve_network_profile(spec, "kubernetes-operator")
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        context_id = normalize_context_id(context_id)
+        name = _sanitize_name(template_id, context_id)
+        ns = settings.kubernetes_namespace
+        s = dict(spec or {})
+        s.setdefault("storage", settings.kubernetes_storage_size)
+
+        image = s.get("image", settings.effective_kubernetes_image)
+        storage_size = s.get("storage")  # absent = ephemeral
+
+        # Build CRD spec aligned with manifests/terminal-crd.yaml.
+        cr_spec: dict = {
+            "templateId": template_id,
+            "image": image,
+            "imagePullPolicy": pull_policy(image),
+            "contextId": context_id,
+        }
+        restricted = restricted_enabled(s)
+        if restricted:
+            cr_spec["restricted"] = True
+        pod_security = pod_security_context(s)
+        if pod_security:
+            cr_spec["podSecurityContext"] = pod_security
+        container_security = container_security_context(s)
+        if container_security:
+            cr_spec["containerSecurityContext"] = container_security
+
+        # CPU / memory limits
+        limits = {}
+        if s.get("cpu_limit"):
+            limits["cpu"] = s["cpu_limit"]
+        if s.get("memory_limit"):
+            limits["memory"] = s["memory_limit"]
+        if limits:
+            cr_spec["resources"] = {"limits": limits}
+
+        # Storage: present = persistent, absent = ephemeral
+        if storage_size:
+            cr_spec["storage"] = storage_size
+            if settings.kubernetes_storage_class:
+                cr_spec["storageClass"] = settings.kubernetes_storage_class
+            cr_spec["persistence"] = {
+                "enabled": True,
+                "size": storage_size,
+                "storageClass": settings.kubernetes_storage_class,
+            }
+        else:
+            cr_spec["persistence"] = {"enabled": False}
+
+        # Env vars
+        env = build_terminal_env(
+            s.get("env", {}),
+            cpu_limit=s.get("cpu_limit"),
+            memory_limit=s.get("memory_limit"),
+        )
+        if env:
+            cr_spec["env"] = env
+        pod_template = s.get("pod_template") or s.get("podTemplate")
+        if profile:
+            pod_template = deep_merge(pod_template, {
+                "metadata": {"labels": profile["kubernetes_labels"]},
+            })
+        if pod_template:
+            cr_spec["podTemplate"] = pod_template
+
+        # Idle timeout
+        idle_timeout = s.get("idle_timeout_minutes", settings.idle_timeout_minutes)
+        if idle_timeout is not None and idle_timeout >= 0:
+            cr_spec["idleTimeoutMinutes"] = idle_timeout
+
+        template_slug = template_label(template_id)
+
+        cr = {
+            "apiVersion": f"{self._group}/{self._version}",
+            "kind": "Terminal",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "terminals",
+                    "app.kubernetes.io/part-of": "open-terminal",
+                    "openwebui.com/instance": get_terminal_id(template_id, context_id),
+                    "openwebui.com/template": template_slug,
+                    CONTEXT_TYPE_LABEL: (
+                        DEFAULT_CONTEXT_ID
+                        if context_id == DEFAULT_CONTEXT_ID
+                        else context_id.split(":", 1)[0]
+                    ),
+                    CONTEXT_HASH_LABEL: context_hash(context_id),
+                },
+                "annotations": {
+                    _TEMPLATE_ID_ANNOTATION: template_id,
+                    CONTEXT_ID_ANNOTATION: context_id,
+                },
+            },
+            "spec": cr_spec,
+        }
+
+        try:
+            return await custom.create_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                body=cr,
+            )
+        except client.exceptions.ApiException as exc:
+            if exc.status == 409:
+                # Already exists — but may be mid-deletion (finalizer pending).
+                existing = await self._get_terminal_cr(template_id, context_id)
+                if existing and existing.get("metadata", {}).get("deletionTimestamp"):
+                    # CR is being deleted; wait for it to vanish, then retry create
+                    await self._wait_for_deletion(
+                        template_id, context_id=context_id, timeout=60
+                    )
+                    return await custom.create_namespaced_custom_object(
+                        group=self._group,
+                        version=self._version,
+                        namespace=ns,
+                        plural=self._plural,
+                        body=cr,
+                    )
+                if existing:
+                    return existing
+                # Gone between the 409 and our GET — safe to retry
+                return await custom.create_namespaced_custom_object(
+                    group=self._group,
+                    version=self._version,
+                    namespace=ns,
+                    plural=self._plural,
+                    body=cr,
+                )
+            raise
+
+    async def _delete_terminal_cr(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        wait: bool = True,
+        timeout: int = 60,
+    ) -> bool:
+        """Delete the Terminal CR for a template/context and optionally wait for it to be gone.
+
+        When *wait* is True (default), polls until the CR returns 404 so that
+        a subsequent create won't collide with the kopf finalizer.
+        """
+        context_id = normalize_context_id(context_id)
+        key = self._key(template_id, context_id)
+        self._instances.pop(key, None)
+        self._specs.pop(key, None)
+        self._running_checked_at.pop(key, None)
+        self._activity_synced_at.pop(key, None)
+        self._last_activity_status_updated_at.pop(key, None)
+
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        name = _sanitize_name(template_id, context_id)
+        ns = settings.kubernetes_namespace
+        try:
+            await custom.delete_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                name=name,
+            )
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+
+        if not wait:
+            return True
+
+        # Poll until the CR is fully removed (finalizer may delay deletion)
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await custom.get_namespaced_custom_object(
+                    group=self._group,
+                    version=self._version,
+                    namespace=ns,
+                    plural=self._plural,
+                    name=name,
+                )
+            except client.exceptions.ApiException as e:
+                if e.status == 404:
+                    return True
+                raise
+            await asyncio.sleep(1)
+
+        raise RuntimeError(f"Terminal CR {name} is still terminating after {timeout}s")
+
+    async def _wait_for_deletion(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        timeout: int = 60,
+    ) -> None:
+        """Poll until a Terminal CR no longer exists (404)."""
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        name = _sanitize_name(template_id, context_id)
+        ns = settings.kubernetes_namespace
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await custom.get_namespaced_custom_object(
+                    group=self._group,
+                    version=self._version,
+                    namespace=ns,
+                    plural=self._plural,
+                    name=name,
+                )
+            except client.exceptions.ApiException as e:
+                if e.status == 404:
+                    return
+                raise
+            await asyncio.sleep(1)
+
+        log.warning("Terminal CR %s still exists after %ds wait", name, timeout)
+
+    async def _wait_for_ready(self, name: str, namespace: str) -> Optional[dict]:
+        """Poll the CR status until Running with serviceUrl and apiKeySecret.
+
+        Returns a dict with ``service_url`` and ``api_key``, or None on timeout.
+        """
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+
+        timeout = settings.provision_timeout_seconds
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                cr = await custom.get_namespaced_custom_object(
+                    group=self._group,
+                    version=self._version,
+                    namespace=namespace,
+                    plural=self._plural,
+                    name=name,
+                )
+                status = cr.get("status", {})
+                if status.get("phase") == "Error":
+                    raise ProvisioningError(status.get("message") or "Machine provisioning failed")
+                if (
+                    status.get("phase") == "Running"
+                    and status.get("serviceUrl")
+                    and status.get("apiKeySecret")
+                ):
+                    api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+                    if api_key:
+                        return {
+                            "service_url": status["serviceUrl"],
+                            "api_key": api_key,
+                        }
+            except client.exceptions.ApiException:
+                pass
+            await asyncio.sleep(2)
+
+        log.warning(
+            "Terminal CR %s did not reach Running in %ds",
+            name,
+            timeout,
+        )
+        return None
+
+    def _parse_service_url(self, service_url: str) -> tuple[str, int]:
+        """Extract host and port from a service URL like http://svc:8000."""
+        url = service_url.rstrip("/")
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        if ":" in url:
+            host, port_str = url.rsplit(":", 1)
+            return host, int(port_str)
+        return url, 8000
+
+    async def _wait_for_reset_pod(
+        self, core: client.CoreV1Api, name: str, namespace: str, timeout: int = 120
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            pod = await core.read_namespaced_pod(name, namespace)
+            phase = pod.status.phase
+            if phase == "Succeeded":
+                return
+            if phase == "Failed":
+                raise RuntimeError(f"Reset pod {name} failed")
+            await asyncio.sleep(1)
+        raise TimeoutError(f"Reset pod {name} did not finish within {timeout}s")
+
+    async def _wait_for_pod_deletion(
+        self, core: client.CoreV1Api, name: str, namespace: str, timeout: int = 30
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await core.read_namespaced_pod(name, namespace)
+            except client.exceptions.ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            await asyncio.sleep(0.5)
+
+    async def reset(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
+    ) -> None:
+        api_client = await self._ensure_client()
+        core = client.CoreV1Api(api_client)
+        ns = settings.kubernetes_namespace
+        s = dict(spec or {})
+        s.setdefault("storage", settings.kubernetes_storage_size)
+        context_id = normalize_context_id(context_id)
+        terminal_name = _sanitize_name(template_id, context_id)
+        reset_name = f"{terminal_name[:57]}-reset"
+        claim_name = f"{terminal_name}-pvc"
+
+        try:
+            await core.read_namespaced_persistent_volume_claim(claim_name, ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return
+            raise
+
+        labels = {
+            "app.kubernetes.io/managed-by": "terminals",
+            "app.kubernetes.io/part-of": "open-terminal",
+            "openwebui.com/instance": get_terminal_id(template_id, context_id),
+            "openwebui.com/template": template_label(template_id),
+            CONTEXT_TYPE_LABEL: (
+                DEFAULT_CONTEXT_ID
+                if context_id == DEFAULT_CONTEXT_ID
+                else context_id.split(":", 1)[0]
+            ),
+            CONTEXT_HASH_LABEL: context_hash(context_id),
+            "openwebui.com/reset": "true",
+        }
+        pod_template = s.get("pod_template") or s.get("podTemplate") or {}
+        labels = {**(pod_template.get("metadata", {}).get("labels") or {}), **labels}
+        labels.update(resolve_network_profile(s, "kubernetes-operator").get("kubernetes_labels", {}))
+        template = pod_template.get("spec") or {}
+        terminal_container = next(
+            (item for item in template.get("containers", []) if item.get("name") == "open-terminal"),
+            {},
+        )
+        reset_image = s.get("image", settings.effective_kubernetes_image)
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=reset_name, namespace=ns, labels=labels),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                automount_service_account_token=False,
+                security_context=deep_merge(
+                    template.get("securityContext"), pod_security_context(s)
+                ) or None,
+                containers=[
+                    client.V1Container(
+                        name="reset",
+                        image=reset_image,
+                        image_pull_policy=pull_policy(reset_image),
+                        security_context=deep_merge(
+                            terminal_container.get("securityContext"), container_security_context(s)
+                        ) or None,
+                        resources=client.V1ResourceRequirements(
+                            requests={"cpu": "10m", "memory": "16Mi"},
+                            limits={"cpu": "100m", "memory": "64Mi"},
+                        ),
+                        command=[
+                            "sh",
+                            "-c",
+                            "find /home/user -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
+                        ],
+                        volume_mounts=[
+                            client.V1VolumeMount(name="home", mount_path="/home/user")
+                        ],
+                    )
+                ],
+                volumes=[
+                    client.V1Volume(
+                        name="home",
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=claim_name,
+                        ),
+                    )
+                ],
+                node_selector=deep_merge(template.get("nodeSelector"), node_selector()) or None,
+                tolerations=tolerations() or template.get("tolerations"),
+                runtime_class_name=template.get("runtimeClassName"),
+                priority_class_name=template.get("priorityClassName"),
+                affinity=template.get("affinity"),
+                node_name=template.get("nodeName"),
+                scheduler_name=template.get("schedulerName"),
+                topology_spread_constraints=template.get("topologySpreadConstraints"),
+                image_pull_secrets=template.get("imagePullSecrets"),
+                service_account_name=template.get("serviceAccountName"),
+            ),
+        )
+
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+            await self._wait_for_pod_deletion(core, reset_name, ns)
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        await core.create_namespaced_pod(ns, pod)
+        await self._wait_for_reset_pod(core, reset_name, ns)
+        try:
+            await core.delete_namespaced_pod(reset_name, ns)
+        except client.exceptions.ApiException:
+            pass
+
+    async def provision(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: dict | None = None,
+    ) -> Optional[dict]:
+        """Create a Terminal CR and wait for it to become ready.
+
+        Returns connection info dict or ``None`` on timeout.
+        """
+        context_id = normalize_context_id(context_id)
+        cr = await self._create_terminal_cr(
+            template_id=template_id, context_id=context_id, spec=spec
+        )
+        name = cr["metadata"]["name"]
+        ns = settings.kubernetes_namespace
+
+        ready = await self._wait_for_ready(name, ns)
+        if ready:
+            host, port = self._parse_service_url(ready["service_url"])
+            return {
+                "workload_name": name,
+                "api_key": ready["api_key"],
+                "host": host,
+                "port": port,
+            }
+
+        return None
+
+
+
+    async def status(self, name: str) -> str:
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        ns = settings.kubernetes_namespace
+
+        try:
+            cr = await custom.get_namespaced_custom_object(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                name=name,
+            )
+            phase = cr.get("status", {}).get("phase", "Unknown")
+            if phase == "Running":
+                return "running"
+            if phase in ("Provisioning", "Pending"):
+                return "running"  # still coming up
+            if phase == "Idle":
+                return "stopped"
+            return "stopped"
+        except client.exceptions.ApiException as exc:
+            if exc.status != 404:
+                raise
+            return "missing"
+
+    async def close(self) -> None:
+        if self._api_client is not None:
+            await self._api_client.close()
+            self._api_client = None
+
+    # ------------------------------------------------------------------
+    # Operator-aware ensure_terminal
+    # ------------------------------------------------------------------
+
+    async def _ensure_terminal(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        spec: Optional[dict] = None,
+    ) -> Optional[dict]:
+        """Get or create a terminal, resolving from K8s CRDs.
+
+        Called under the instance lock by ensure_terminal.
+
+        Returns a dict with ``api_key``, ``host``, ``port`` or ``None``.
+        """
+        context_id = normalize_context_id(context_id)
+        key = self._key(template_id, context_id)
+        checked = self._running_checked_at.get(key)
+        if (
+            key in self._instances
+            and settings.status_cache_ttl > 0
+            and checked is not None
+            and time.monotonic() - checked < settings.status_cache_ttl
+        ):
+            return self._instances[key]
+
+        cr = await self._get_terminal_cr(template_id, context_id)
+
+        if cr is None:
+            await self._apply_due_reset(template_id, context_id, spec)
+            info = await self.provision(
+                template_id=template_id, context_id=context_id, spec=spec
+            )
+            if info:
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+            return info
+
+        status = cr.get("status") or {}
+        phase = status.get("phase")
+
+        if phase in ("Idle", "Error"):
+            log.info(
+                "Terminal CR %s in phase %s, deleting before refresh",
+                cr["metadata"]["name"],
+                phase,
+            )
+            await self._delete_terminal_cr(template_id, context_id=context_id)
+            await self._apply_due_reset(template_id, context_id, spec)
+            info = await self.provision(
+                template_id=template_id, context_id=context_id, spec=spec
+            )
+            if info:
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+            return info
+
+        if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
+            api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+            if api_key:
+                host, port = self._parse_service_url(status["serviceUrl"])
+                info = {
+                    "workload_name": cr["metadata"]["name"],
+                    "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
+                    "api_key": api_key,
+                    "host": host,
+                    "port": port,
+                }
+                self._instances[key] = info
+                self._specs[key] = spec or {}
+                self._running_checked_at[key] = time.monotonic()
+                return info
+
+        # Still provisioning — wait for the operator to bring it up
+        name = cr["metadata"]["name"]
+        ns = settings.kubernetes_namespace
+        ready = await self._wait_for_ready(name, ns)
+        if ready:
+            host, port = self._parse_service_url(ready["service_url"])
+            info = {
+                "workload_name": cr["metadata"]["name"],
+                "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
+                "api_key": ready["api_key"],
+                "host": host,
+                "port": port,
+            }
+            self._instances[key] = info
+            self._specs[key] = spec or {}
+            self._running_checked_at[key] = time.monotonic()
+            return info
+
+        return None
+
+    async def get_terminal_info(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> Optional[dict]:
+        """Look up an existing terminal from the K8s CRD without creating one."""
+        cr = await self._get_terminal_cr(template_id, context_id)
+        if cr is None:
+            return None
+
+        status = cr.get("status") or {}
+        phase = status.get("phase")
+
+        if phase == "Running" and status.get("serviceUrl") and status.get("apiKeySecret"):
+            api_key = await self._read_api_key_from_secret(status["apiKeySecret"])
+            if api_key:
+                host, port = self._parse_service_url(status["serviceUrl"])
+                return {
+                    "workload_name": cr["metadata"]["name"],
+                    "started_at": parse_started_at(cr["metadata"].get("creationTimestamp")),
+                    "api_key": api_key,
+                    "host": host,
+                    "port": port,
+                }
+
+        return None
+
+    async def touch_activity(
+        self,
+        template_id: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> None:
+        """Update lastActivityAt on the Terminal CR to prevent idle culling."""
+        context_id = normalize_context_id(context_id)
+        key = self._key(template_id, context_id)
+        checked = self._last_activity_status_updated_at.get(key)
+        synced = self._activity_synced_at.get(key)
+        interval = max(1, min(settings.status_cache_ttl or 30, 60))
+        if synced is None or time.monotonic() - synced >= interval:
+            await mark_terminal_active(template_id, context_id)
+            self._activity_synced_at[key] = time.monotonic()
+        if checked is not None and time.monotonic() - checked < interval:
+            return
+
+        api_client = await self._ensure_client()
+        custom = client.CustomObjectsApi(api_client)
+        name = _sanitize_name(template_id, context_id)
+        ns = settings.kubernetes_namespace
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            await custom.patch_namespaced_custom_object_status(
+                group=self._group,
+                version=self._version,
+                namespace=ns,
+                plural=self._plural,
+                name=name,
+                body={"status": {"lastActivityAt": now}},
+                _content_type="application/merge-patch+json",
+            )
+            self._last_activity_status_updated_at[key] = time.monotonic()
+        except client.exceptions.ApiException as e:
+            if e.status != 404:
+                log.warning("Failed to touch activity for %s: %s", name, e)
+            else:
+                self.invalidate_status(template_id, context_id)
+                self._last_activity_status_updated_at.pop(key, None)
