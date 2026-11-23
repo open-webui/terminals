@@ -1,11 +1,11 @@
 # Machines API (Terminals)
 
-Run [Open Terminal](https://github.com/open-webui/open-terminal) environments from shared templates. The service starts containers on demand, routes requests by template and scope, and manages persistent files and idle cleanup on Docker or Kubernetes.
+Run [Machine (Open Terminal)](https://github.com/open-webui/open-terminal) environments from shared templates. The service starts containers on demand, routes requests by template and scope, and manages persistent files and idle cleanup on Docker or Kubernetes.
 
 **Requires Open WebUI 0.13.4 or later.**
 
 ```text
-Open WebUI → Machines → Open Terminal containers
+Open WebUI → Machines → Machine (Open Terminal) containers
 ```
 
 > [!IMPORTANT]
@@ -44,7 +44,7 @@ printf 'API key: %s\n' "$API_KEY"
 
 Save the printed key. Use the same key when recreating the service. If the `terminals` network already exists, skip the network creation command.
 
-The service and the Open Terminal containers use the same Docker network, so no host gateway configuration is needed. The `data` directory holds the database and users' workspace files.
+The service and the Machine (Open Terminal) containers use the same Docker network, so no host gateway configuration is needed. The `data` directory holds the database and users' workspace files.
 
 ### 2. Open the admin UI
 
@@ -66,7 +66,7 @@ If Open WebUI runs in Docker, attach its container to the same network. Replace 
 docker network connect terminals open-webui
 ```
 
-In Open WebUI, open **Settings → Admin → Integrations → Machines** and add a connection. Older versions of Open WebUI label this section **Open Terminal**.
+In Open WebUI, open **Settings → Admin → Integrations** and add a Machine (Open Terminal) connection. Look under **Machines** in current versions or the runtime’s name in older versions.
 
 | Field | Value |
 |-------|-------|
@@ -171,7 +171,7 @@ curl -fsS http://localhost:3000/execute \
 |-------|---------|
 | `name` | Display name; changing it preserves instance identity |
 | `scope` | `null`, `"user"`, `"chat"`, or `"model"` |
-| `image` | Open Terminal image to run |
+| `image` | Machine (Open Terminal) image to run |
 | `env` | Environment variables passed to the machine |
 | `network_profile` | Optional name from `MACHINES_NETWORK_PROFILES`; omitted uses existing networking defaults |
 | `cpu_limit`, `memory_limit` | Resource limits, such as `"2"` and `"4Gi"` |
@@ -342,7 +342,7 @@ Every `MACHINES_*` setting also accepts its `TERMINALS_*` name. You can mix pref
 | `MACHINES_PORT` | `3000` | Orchestrator API bind port |
 | `MACHINES_WORKERS` | `1` | Uvicorn worker process count. Docker workers adopt existing containers by deterministic name instead of replacing them. |
 | `MACHINES_ENABLE_UI` | `true` | Serve the built-in minimal admin UI at `/`. Set to `false` for API-only deployments. |
-| `MACHINES_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default Open Terminal container image |
+| `MACHINES_IMAGE` | `ghcr.io/open-webui/open-terminal:latest` | Default Machine (Open Terminal) container image |
 | `MACHINES_IMAGE_PULL_POLICY` | | `Always`, `IfNotPresent`, or `Never`, for every backend. Unset pulls images tagged `:latest` or untagged on every start and other tags only when missing, matching Kubernetes. |
 | `MACHINES_IMAGE_PULL_INTERVAL_SECONDS` | `3600` | Docker only: how long a pulled image is used before `Always` checks the registry again. If the registry can't be reached, the local copy is used. |
 | `MACHINES_NETWORK_PROFILES` | `{}` | JSON object mapping profile names to `docker_network` and/or `kubernetes_labels` configuration |
@@ -354,13 +354,13 @@ Every `MACHINES_*` setting also accepts its `TERMINALS_*` name. You can mix pref
 | `MACHINES_MAX_LIFETIME_MINUTES` | `0` | Minutes after start before machines are torn down, even while in use. `0` disables the limit. |
 | `MACHINES_IDLE_CLEANUP_TIMEOUT_SECONDS` | `120` | Timeout for each teardown/reset call during idle cleanup |
 | `MACHINES_DATABASE_URL` | `sqlite+aiosqlite:////app/data/terminals.db` in the image | SQLAlchemy database URL. Source installs use `data/terminals.db` next to the package directory. PostgreSQL is optional. |
-| `MACHINES_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Open Terminal does not expose a log-level env var. |
+| `MACHINES_LOG_LEVEL` | `INFO` | Minimum orchestrator log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. On Docker, `WARNING` or higher disables child container Docker logs because Machine (Open Terminal) does not expose a log-level env var. |
 | `MACHINES_STATUS_CACHE_TTL` | `30` | Seconds a confirmed-running container status is trusted before re-inspecting it via the backend. `0` re-checks on every request. |
 | `MACHINES_WS_COMPRESSION` | `false` | Enable permessage-deflate on proxied WebSocket traffic. Leave off unless clients connect over slow links. |
 | `MACHINES_ACCESS_LOG` | `false` | Log every HTTP request. Off by default because per-request logging is expensive at high request rates. |
 | `MACHINES_REPLAY_BODY_LIMIT` | | Maximum proxied request body bytes buffered for retry. Unset, `none`, `null`, or `unlimited` means no size cap. |
 | `MACHINES_PROXY_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for opening upstream proxy connections to machine containers |
-| `MACHINES_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Keep above Open Terminal's maximum `/execute?wait` value. |
+| `MACHINES_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Set this above the maximum `/execute?wait` value for Machine (Open Terminal). |
 | `MACHINES_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream |
 | `MACHINES_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool |
 | `MACHINES_PROVISION_TIMEOUT_SECONDS` | `120` | Timeout waiting for machine readiness on the `kubernetes-operator` backend |
@@ -422,7 +422,7 @@ MACHINES_DOCKER_MOUNTS='[
 
 `source` is an absolute path on the Docker daemon host. `target` is the absolute
 container path. `readOnly` defaults to `true`. Do not mount over `/home/user`;
-Open Terminal expects that directory to stay writable.
+Machine (Open Terminal) expects that directory to stay writable.
 
 Kubernetes deployments do not use `MACHINES_DOCKER_MOUNTS`. Use the existing
 template `podTemplate` field and native Kubernetes volumes instead:
