@@ -21,7 +21,7 @@ from starlette.background import BackgroundTask
 from terminals.backends.base import ProvisioningError
 from terminals.config import settings
 from terminals.utils.context import (
-    CONTEXT_HEADER, TEMPLATE_HEADER, CHAT_HEADER, MODEL_HEADER, terminal_identity, get_terminal_id,
+    CONTEXT_HEADERS, TEMPLATE_HEADERS, CHAT_HEADERS, MODEL_HEADERS, terminal_identity, get_terminal_id,
     DEFAULT_CONTEXT_ID,
 )
 from terminals.utils.template_specs import TemplateNotFoundError, resolve_template_spec
@@ -77,17 +77,24 @@ async def close_proxy_client() -> None:
 
 
 
+def _routing_header(headers, names):
+    current, legacy = (headers.get(name) for name in names)
+    if current is not None and legacy is not None and current != legacy:
+        raise HTTPException(400, f"Conflicting {names[0]} and {names[1]}")
+    return current if current is not None else legacy
+
+
 async def _request_target(request, user_id):
-    template_id = request.headers.get(TEMPLATE_HEADER)
+    template_id = _routing_header(request.headers, TEMPLATE_HEADERS)
     if not template_id:
-        raise HTTPException(400, "Missing X-Terminal-Template-Id")
-    if request.headers.get(CONTEXT_HEADER):
+        raise HTTPException(400, f"Missing {TEMPLATE_HEADERS[0]}")
+    if any(request.headers.get(name) for name in CONTEXT_HEADERS):
         raise HTTPException(400, "Client-selected instance contexts are no longer supported")
     spec = await _resolve_template_spec(template_id)
     scope = (spec or {}).get("scope")
     context, _ = terminal_identity(template_id, scope, user_id=user_id,
-                                   chat_id=request.headers.get(CHAT_HEADER),
-                                   model_id=request.headers.get(MODEL_HEADER))
+                                   chat_id=_routing_header(request.headers, CHAT_HEADERS),
+                                   model_id=_routing_header(request.headers, MODEL_HEADERS))
     return template_id, context
 
 
@@ -146,6 +153,21 @@ async def _resolve_instance(
     )
 
 
+async def _try_resolve_instance(
+    conn, user_id: str, template_id: str, context_id: str, *, reraise_http: bool = True
+) -> Optional[InstanceInfo]:
+    """Like _resolve_instance, but returns None instead of raising (except HTTP errors, if asked)."""
+    try:
+        return await _resolve_instance(conn, user_id, template_id=template_id, context_id=context_id)
+    except HTTPException:
+        if reraise_http:
+            raise
+        logger.error("Re-resolving terminal for user {} was rejected", user_id)
+    except Exception as exc:
+        logger.error("Could not re-resolve terminal for user {}: {}", user_id, exc)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal proxy helper
 # ---------------------------------------------------------------------------
@@ -178,8 +200,9 @@ async def _proxy_request(
     # Replace auth with the instance's own API key.
     headers["authorization"] = f"Bearer {instance.api_key}"
     # Remove hop-by-hop / routing headers.
-    for h in ("host", "transfer-encoding", "connection", "x-user-id", CONTEXT_HEADER.lower(), TEMPLATE_HEADER.lower(), CHAT_HEADER.lower(), MODEL_HEADER.lower()):
-        headers.pop(h, None)
+    for name in ("host", "transfer-encoding", "connection", "x-user-id",
+                 *CONTEXT_HEADERS, *TEMPLATE_HEADERS, *CHAT_HEADERS, *MODEL_HEADERS):
+        headers.pop(name.lower(), None)
 
     raw_content_length = request.headers.get("content-length")
     try:
@@ -218,17 +241,8 @@ async def _proxy_request(
             if attempt < max_retries - 1:
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
-                try:
-                    instance = await _resolve_instance(
-                        request,
-                        user_id,
-                        template_id=template_id,
-                        context_id=context_id,
-                    )
-                except HTTPException:
-                    raise
-                except Exception as resolve_err:
-                    logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
+                instance = await _try_resolve_instance(request, user_id, template_id, context_id)
+                if instance is None:
                     return Response(
                         content='{"error": "Terminal instance not reachable"}',
                         status_code=502,
@@ -268,17 +282,8 @@ async def _proxy_request(
                     target_url,
                     e,
                 )
-                try:
-                    instance = await _resolve_instance(
-                        request,
-                        user_id,
-                        template_id=template_id,
-                        context_id=context_id,
-                    )
-                except HTTPException:
-                    raise
-                except Exception as resolve_err:
-                    logger.error("Re-resolving terminal for user {} failed: {}", user_id, resolve_err)
+                instance = await _try_resolve_instance(request, user_id, template_id, context_id)
+                if instance is None:
                     return Response(
                         content='{"error": "Upstream connection failed"}',
                         status_code=502,
@@ -441,15 +446,9 @@ async def _validate_ws_auth(
     return user_id
 
 
-
-
-async def _ws_proxy(
-    ws: WebSocket,
-    path: str,
-    user_id: str,
-    template_id: str,
-    context_id: str = DEFAULT_CONTEXT_ID,
-):
+async def _relay_websocket(
+    ws: WebSocket, path: str, user_id: str, *, template_id: str, context_id: str = DEFAULT_CONTEXT_ID
+) -> None:
     try:
         instance = await _resolve_instance(
             ws, user_id, template_id=template_id, context_id=context_id
@@ -483,15 +482,8 @@ async def _ws_proxy(
             if attempt < max_retries - 1:
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
-                try:
-                    instance = await _resolve_instance(
-                        ws,
-                        user_id,
-                        template_id=template_id,
-                        context_id=context_id,
-                    )
-                except Exception as resolve_err:
-                    logger.error("WS re-resolve for user {} failed: {}", user_id, resolve_err)
+                instance = await _try_resolve_instance(ws, user_id, template_id, context_id, reraise_http=False)
+                if instance is None:
                     await ws.close(code=4003, reason="Terminal instance not reachable")
                     return
             else:
@@ -582,7 +574,7 @@ async def ws_proxy(ws: WebSocket, path: str, user_id: str = Query("")):
     key = get_terminal_id(template_id, context_id)
     _instance_sockets.setdefault(key, set()).add(ws)
     try:
-        await _ws_proxy(ws, path, effective_user, template_id=template_id, context_id=context_id)
+        await _relay_websocket(ws, path, effective_user, template_id=template_id, context_id=context_id)
     finally:
         try:
             await ws.close()

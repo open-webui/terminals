@@ -13,7 +13,7 @@ from terminals.config import settings
 from terminals.db.session import close_db, init_db
 from terminals.logging import setup_logging
 from terminals.middleware import RequestIdMiddleware
-from terminals.routers.terminals import router as terminals_router
+from terminals.routers.terminals import router as machines_router
 from terminals.routers.proxy import close_proxy_client, router as proxy_router
 
 
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Terminals",
+    title="Machines API (Terminals)",
     description="Multi-tenant terminal orchestrator for Open Terminal.",
     version="0.4.4",
     lifespan=lifespan,
@@ -65,7 +65,8 @@ async def health():
 
 
 # Template CRUD must be before the catch-all proxy.
-app.include_router(terminals_router)
+app.include_router(machines_router, prefix="/api/v1/machines")
+app.include_router(machines_router, prefix="/api/v1/terminals", include_in_schema=False)
 
 FRONTEND_BUILD_DIR = Path(__file__).parent / "frontend" / "build"
 if FRONTEND_BUILD_DIR.exists():

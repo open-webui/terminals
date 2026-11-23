@@ -1,4 +1,4 @@
-# Terminals
+# Machines API (Terminals)
 
 Run [Open Terminal](https://github.com/open-webui/open-terminal) environments from shared templates. Terminals starts containers on demand, routes requests by template and scope, and manages persistent files and idle cleanup on Docker or Kubernetes.
 
@@ -37,7 +37,7 @@ docker run -d \
   -e TERMINALS_DOCKER_HOST_DATA_DIR="$(pwd)/data/terminals" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/open-webui/terminals:latest
+  ghcr.io/open-webui/terminals
 
 printf 'API key: %s\n' "$API_KEY"
 ```
@@ -86,7 +86,7 @@ See the [Open WebUI connection guide](https://docs.openwebui.com/features/open-t
 Create a user-scoped template, then execute as the example user `demo-user`:
 
 ```bash
-curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates \
+curl -fsS -X POST http://localhost:3000/api/v1/machines/templates \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"id":"demo","data":{"name":"My workspace","scope":"user"}}'
@@ -96,7 +96,7 @@ curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates \
 curl -fsS http://localhost:3000/execute \
   -H "Authorization: Bearer $API_KEY" \
   -H "X-User-Id: demo-user" \
-  -H "X-Terminal-Template-Id: demo" \
+  -H "X-Machine-Template-Id: demo" \
   -H "Content-Type: application/json" \
   -d '{"command":"echo hello"}'
 ```
@@ -129,7 +129,7 @@ Missing required context is an error. Creating two independent terminals creates
 
 Open WebUI stores access grants per template. **Use** permits commands and file changes; **Manage** also permits configuration, sharing, and environment management. New templates are private to their creator. Parent connection access remains required. Snapshot-only chat sharing grants no execution access.
 
-Templates are managed at `/api/v1/terminals/templates`. Execution uses the existing proxy with `X-Terminal-Template-Id` and verified user, chat, or model headers from WebUI. Managed requests require `TERMINALS_API_KEY`; Terminals does not call WebUI to authorize them.
+Templates are managed at `/api/v1/machines/templates`. The legacy prefix `/api/v1/terminals` supports the same admin operations. For HTTP, WebSocket, and OpenAPI requests, send `X-User-Id` and `X-Machine-Template-Id`. Chat and model scopes also require `X-Machine-Chat-Id` or `X-Machine-Model-Id`, respectively. Each routing header also accepts its original `X-Terminal-*` spelling. If both spellings are sent, their values must match. Managed requests require `TERMINALS_API_KEY`; Terminals does not call WebUI to authorize them.
 
 Persistent homes live under `.terminals/<terminal-id>` on Docker and shared Kubernetes storage; dedicated Kubernetes storage uses a separate PVC. The terminal ID is derived from the template and scope context. Restart preserves files. Reset clears only the selected environment's files. Deleting a template removes its environments and files.
 
@@ -140,7 +140,7 @@ For existing deployments, see the [0.4.0 upgrade requirements](CHANGELOG.md#movi
 A template defines the terminal's scope, image, environment variables, and resource limits. Create one in the admin UI or through the API; fresh installations do not create a default template automatically.
 
 ```bash
-curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates \
+curl -fsS -X POST http://localhost:3000/api/v1/machines/templates \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -162,7 +162,7 @@ Select the template in the execution headers:
 curl -fsS http://localhost:3000/execute \
   -H "Authorization: Bearer $API_KEY" \
   -H "X-User-Id: demo-user" \
-  -H "X-Terminal-Template-Id: data-science" \
+  -H "X-Machine-Template-Id: data-science" \
   -H "Content-Type: application/json" \
   -d '{"command":"echo hello"}'
 ```
@@ -216,10 +216,10 @@ profile changes to existing terminals.
 
 ### Apply changes to existing terminals
 
-Edit configuration with `PATCH /api/v1/terminals/templates/{id}`. Changes take effect when an environment next starts. Restart stops the selected environment, preserves its files, and starts it again with the current template configuration:
+Edit configuration with `PATCH /api/v1/machines/templates/{id}`. Changes take effect when an environment next starts. Restart stops the selected environment, preserves its files, and starts it again with the current template configuration:
 
 ```bash
-curl -fsS -X POST http://localhost:3000/api/v1/terminals/templates/data-science/restart \
+curl -fsS -X POST http://localhost:3000/api/v1/machines/templates/data-science/restart \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"user_id":"demo-user"}'
@@ -232,7 +232,7 @@ For chat or model scope, also supply `chat_id` or `model_id`. Restart does not c
 Scheduled resets delete persisted terminal files and refresh matching terminals, including active ones. Configure them in the template editor or with:
 
 ```bash
-curl -fsS -X PUT http://localhost:3000/api/v1/terminals/templates/data-science/lifecycle \
+curl -fsS -X PUT http://localhost:3000/api/v1/machines/templates/data-science/lifecycle \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"reset":{"schedule":"@weekly","timezone":"UTC"}}'
@@ -271,10 +271,10 @@ Terminal files need a filesystem. Open WebUI's uploaded-file storage and Azure B
 
 ### Delete an environment's files
 
-Deleting an Open WebUI account does not automatically delete terminal storage. Inspect a template's tracked instances with `GET /api/v1/terminals/templates/{id}/instances` (or all instances with `GET /api/v1/terminals`), then delete the specific template/context:
+Deleting an Open WebUI account does not automatically delete terminal storage. Inspect a template's tracked instances with `GET /api/v1/machines/templates/{id}/instances` (or all instances with `GET /api/v1/machines`), then delete the specific template/context:
 
 ```bash
-curl -fsS -X DELETE http://localhost:3000/api/v1/terminals/templates/data-science/instance \
+curl -fsS -X DELETE http://localhost:3000/api/v1/machines/templates/data-science/instance \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"user_id":"deleted-user-id"}'
