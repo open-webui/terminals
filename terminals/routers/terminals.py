@@ -7,7 +7,7 @@ from terminals.models.template import Template
 from terminals.routers.auth import verify_admin_api_key
 from terminals.routers.templates import router as templates_router
 
-router = APIRouter(prefix="/api/v1/terminals", tags=["terminals"], dependencies=[Depends(verify_admin_api_key)])
+router = APIRouter(tags=["machines"], dependencies=[Depends(verify_admin_api_key)])
 router.include_router(templates_router, prefix="/templates")
 
 

@@ -4,10 +4,10 @@ import json
 from fastapi import HTTPException
 
 DEFAULT_CONTEXT_ID = "default"
-TEMPLATE_HEADER = "X-Terminal-Template-Id"
-CHAT_HEADER = "X-Terminal-Chat-Id"
-MODEL_HEADER = "X-Terminal-Model-Id"
-CONTEXT_HEADER = "X-Terminal-Context-Id"
+TEMPLATE_HEADERS = ("X-Machine-Template-Id", "X-Terminal-Template-Id")
+CHAT_HEADERS = ("X-Machine-Chat-Id", "X-Terminal-Chat-Id")
+MODEL_HEADERS = ("X-Machine-Model-Id", "X-Terminal-Model-Id")
+CONTEXT_HEADERS = ("X-Machine-Context-Id", "X-Terminal-Context-Id")
 CONTEXT_ID_ANNOTATION = "openwebui.com/context-id"
 CONTEXT_TYPE_LABEL = "openwebui.com/context-type"
 CONTEXT_HASH_LABEL = "openwebui.com/context-hash"

@@ -11,7 +11,7 @@
 	const input = 'w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-gray-700';
 	const button = 'rounded-lg px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50';
 	async function api(path: string, method = 'GET', body: unknown = undefined) {
-		const response = await fetch(`/api/v1/terminals${path}`, {method, headers: {Authorization: `Bearer ${token}`, ...(body !== undefined ? {'Content-Type': 'application/json'} : {})}, ...(body !== undefined ? {body: JSON.stringify(body)} : {})});
+		const response = await fetch(`/api/v1/machines${path}`, {method, headers: {Authorization: `Bearer ${token}`, ...(body !== undefined ? {'Content-Type': 'application/json'} : {})}, ...(body !== undefined ? {body: JSON.stringify(body)} : {})});
 		const data = await response.json();
 		if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Request failed');
 		return data;
@@ -50,9 +50,9 @@
 	}
 	onMount(() => {token = sessionStorage.getItem('terminals-key') ?? ''; if (token) void run(load);});
 </script>
-<svelte:head><title>Terminals</title></svelte:head>
+<svelte:head><title>Machines API (Terminals)</title></svelte:head>
 <main class="mx-auto max-w-5xl space-y-6 p-6 text-gray-900 dark:text-gray-100">
-	<header class="flex items-center justify-between"><h1 class="text-xl font-semibold">Terminals <span class="text-sm font-normal text-gray-500">0.4.0</span></h1><button class={button} disabled={busy} onclick={() => edit()}>New terminal</button></header>
+	<header class="flex items-center justify-between"><h1 class="text-xl font-semibold">Machines API (Terminals) <span class="text-sm font-normal text-gray-500">0.4.0</span></h1><button class={button} disabled={busy} onclick={() => edit()}>New terminal</button></header>
 	<form class="flex gap-2" onsubmit={(event) => {event.preventDefault(); sessionStorage.setItem('terminals-key', token); void run(load);}}><input class={input} type="password" bind:value={token} placeholder="Server key" aria-label="Server key" /><button class={button} disabled={busy}>Connect</button></form>
 	{#if error}<p role="alert" class="text-sm text-red-500">{error}</p>{/if}
 	{#if editing}<form class="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-gray-800" onsubmit={save}>
