@@ -1,0 +1,101 @@
+"""Alembic async environment configuration.
+
+Reads the database URL from ``machines.config.settings`` so the
+connection string is never hardcoded in ``alembic.ini``.
+"""
+
+import os
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import pool
+
+from machines.config import settings
+from machines.db.urls import sync_database_url
+
+# Import *all* models so Base.metadata is fully populated.
+from machines.models.base import Base  # noqa: F401
+from machines.models.template import Template, TemplateLifecycle, TemplateLifecycleState  # noqa: F401
+
+# Alembic Config object — gives access to alembic.ini values.
+config = context.config
+
+# Set up Python logging from the INI file.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
+
+# Target metadata for autogenerate support.
+target_metadata = Base.metadata
+
+
+def _get_url() -> str:
+    """Return the DB URL, converting async drivers for offline mode."""
+    return settings.database_url
+
+
+def _sync_url(url: str) -> str:
+    """Convert an async URL to a sync one for offline migrations."""
+    return sync_database_url(url)
+
+
+def _ensure_sqlite_dir(url: str) -> None:
+    """Create parent directories for SQLite database files."""
+    if url.startswith("sqlite"):
+        db_path = url.split("///", 1)[-1]
+        if db_path:
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode (emit SQL without connecting)."""
+    url = _sync_url(_get_url())
+    _ensure_sqlite_dir(url)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection):
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode with a sync engine.
+
+    Alembic is called from within an already-running async event loop
+    (via ``asyncio.to_thread``), so we use a plain sync engine here to
+    avoid nested-event-loop issues with aiosqlite/asyncpg.
+    """
+    from sqlalchemy import create_engine, event
+
+    url = _sync_url(_get_url())
+    _ensure_sqlite_dir(url)
+
+    connectable = create_engine(url, poolclass=pool.NullPool)
+
+    if connectable.dialect.name == "sqlite":
+        @event.listens_for(connectable, "connect")
+        def explicit_transactions(dbapi_connection, _):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(connectable, "begin")
+        def begin(connection):
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
+
+    connectable.dispose()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()

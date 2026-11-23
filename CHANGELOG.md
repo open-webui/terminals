@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-23
+
+You'll now see **Machines API (Terminals)** in the admin page, browser tab, and docs, matching the Machines name in Open WebUI. **Your existing Terminals setup still works.** You can keep your connections, templates, saved files, scripts, and settings as they are. There's no need to rename everything or set it all up again.
+
+### Added
+
+- You can now use `/api/v1/machines` to manage templates and start, stop, restart, reset, or delete workspaces. The admin page and examples use it too. The old `/api/v1/terminals` address still works and reaches the same workspaces with the same permissions.
+- You can now use `MACHINES_*` settings for the service and Kubernetes operator. Your existing `TERMINALS_*` settings still work. Switch them over one at a time, or leave them as they are.
+- Connections can now use `X-Machine-*` names to select a template, chat, or model. The old `X-Terminal-*` names still work, and you can mix old and new names while updating a connection. If you send both names for the same selection, their values need to match.
+
+### Fixed
+
+- The admin page and status response now show the right version instead of an old release number.
+
 ## [0.4.4] - 2026-11-19
 
 > [!WARNING]

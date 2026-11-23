@@ -1,15 +1,15 @@
 # OpenShift Deployment
 
-Terminals can run on OpenShift as a restricted per-user terminal sandbox.
+Machines can provision a restricted workspace for each user on OpenShift.
 
-OpenShift restricted SCC does not support the full rootful agent devbox model. Use prebuilt terminal images and let OpenShift provide the isolation boundary through one pod per user.
+OpenShift restricted SCC does not support the full rootful agent devbox model. Use prebuilt Open Terminal images and let OpenShift provide the isolation boundary through one pod per user.
 
 ## What Works
 
 - One Open Terminal pod per template and user when `scope: "user"`.
 - Persistent user files through PVCs.
 - Template-selected images, env vars, CPU, memory, storage, and idle timeout.
-- Restart and scheduled reset of persisted terminal files.
+- Restart and scheduled reset of persisted workspace files.
 - File browser, command execution, notebooks, and tools that are already in the image.
 
 ## What Does Not Work Under Restricted SCC
@@ -26,13 +26,13 @@ Build a custom Open Terminal image when users need additional tools.
 
 PostgreSQL is not required.
 
-Terminals uses SQLite by default:
+The service uses SQLite by default:
 
 ```text
 sqlite+aiosqlite:///.../data/terminals.db
 ```
 
-Mount persistent storage at `/app/data` for the Terminals service if you use the default SQLite database. Use `TERMINALS_DATABASE_URL` only when you want an external database.
+Mount persistent storage at `/app/data` for the Machines service if you use the default SQLite database. Use `MACHINES_DATABASE_URL` only when you want an external database.
 
 ## Install The Operator
 
@@ -45,17 +45,17 @@ oc apply -f manifests/operator-deployment.yaml
 
 The operator deployment is designed for non-root execution and does not require privileged or anyuid SCC.
 
-## Deploy Terminals
+## Deploy Machines
 
-Run the Terminals service with the operator backend and restricted mode:
+Run the Machines service with the operator backend and restricted mode:
 
 ```yaml
 env:
-  - name: TERMINALS_BACKEND
+  - name: MACHINES_BACKEND
     value: kubernetes-operator
-  - name: TERMINALS_KUBERNETES_NAMESPACE
+  - name: MACHINES_KUBERNETES_NAMESPACE
     value: terminals
-  - name: TERMINALS_KUBERNETES_RESTRICTED
+  - name: MACHINES_KUBERNETES_RESTRICTED
     value: "true"
 ```
 
@@ -66,8 +66,8 @@ If you use the default SQLite database, mount a PVC at `/app/data`.
 Use the OpenShift-compatible Open Terminal image:
 
 ```bash
-curl -X POST https://terminals.example.com/api/v1/terminals/templates \
-  -H "Authorization: Bearer $TERMINALS_API_KEY" \
+curl -X POST https://machines.example.com/api/v1/machines/templates \
+  -H "Authorization: Bearer $MACHINES_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "openshift",
