@@ -57,7 +57,7 @@ class Backend(ABC):
                       self._activity_synced_at, self._running_checked_at):
             cache.pop(key, None)
 
-    async def ensure_terminal(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+    async def ensure_terminal(self, template_id, context_id=DEFAULT_CONTEXT_ID, *, record_activity=False):
         from machines.utils.instances import instance_lock
         context_id = normalize_context_id(context_id)
         key = self._key(template_id, context_id)
@@ -73,6 +73,14 @@ class Backend(ABC):
             info = await self._ensure_terminal(template_id, context_id, spec)
             if info:
                 info.update(template_id=template_id, context_id=context_id)
+                if record_activity:
+                    try:
+                        await self._touch_activity_locked(template_id, context_id)
+                    except Exception:
+                        # Don't admit a request with a stale heartbeat if its home can expire.
+                        if spec.get("retention_period_minutes", settings.retention_period_minutes):
+                            raise
+                        log.debug("Failed to record activity for %s", key, exc_info=True)
             return info
 
     async def _ensure_terminal(self, template_id, context_id=DEFAULT_CONTEXT_ID, spec=None):
@@ -95,13 +103,24 @@ class Backend(ABC):
             return info
         return None
 
-    async def touch_activity(self, template_id, context_id=DEFAULT_CONTEXT_ID):
-        key = self._key(template_id, context_id)
+    def _activity_due(self, key):
         checked = self._activity_synced_at.get(key)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
-        if checked is None or time.monotonic() - checked >= interval:
+        return checked is None or time.monotonic() - checked >= interval
+
+    async def _touch_activity_locked(self, template_id, context_id):
+        key = self._key(template_id, context_id)
+        if self._activity_due(key):
             await mark_terminal_active(template_id, context_id)
             self._activity_synced_at[key] = time.monotonic()
+
+    async def touch_activity(self, template_id, context_id=DEFAULT_CONTEXT_ID):
+        from machines.utils.instances import instance_lock
+
+        key = self._key(template_id, context_id)
+        if self._activity_due(key):
+            async with instance_lock(key):
+                await self._touch_activity_locked(template_id, context_id)
 
     async def _apply_due_reset(self, template_id, context_id, spec):
         if not await reset_due_for(template_id, context_id):
@@ -151,24 +170,39 @@ class Backend(ABC):
         from sqlalchemy import select
         from machines.db.session import async_session
         from machines.models.template import TemplateLifecycleState
-        from machines.utils.instances import instance_lock, stop_instance
+        from machines.utils.instances import delete_locked_instance, instance_lock, stop_instance
         async with async_session() as session:
-            rows = list(await session.scalars(select(TemplateLifecycleState)))
-        for row in rows:
+            keys = (await session.execute(
+                select(TemplateLifecycleState.template_id, TemplateLifecycleState.id)
+            )).all()
+        for template_id, key in keys:
             try:
-                async with instance_lock("template:" + row.template_id, shared=True), instance_lock(row.id):
+                async with instance_lock("template:" + template_id, shared=True), instance_lock(key):
                     async with async_session() as session:
-                        if await session.get(TemplateLifecycleState, row.id) is None:
+                        row = await session.get(TemplateLifecycleState, key)
+                        if row is None:
                             continue
                     current_spec = await resolve_template_spec(row.template_id)
                     spec = self._specs.get(row.id, current_spec) or {}
                     async with asyncio.timeout(settings.idle_cleanup_timeout_seconds):
+                        last_active = terminal_last_active_at(row)
+                        retention = current_spec.get("retention_period_minutes", settings.retention_period_minutes)
+                        # Older template JSON accepted arbitrary values for unknown fields.
+                        if type(retention) is int and retention > 0:
+                            idle_since = last_active or row.created_at
+                            idle_seconds = time.time() - idle_since.replace(tzinfo=timezone.utc).timestamp()
+                            if idle_seconds >= retention * 60:
+                                await delete_locked_instance(self, row, current_spec)
+                                log.info(
+                                    "Deleted idle environment template=%s context=%s after %.0f minutes of inactivity",
+                                    template_id, row.context_id, idle_seconds / 60,
+                                )
+                                continue
                         if await self._apply_due_reset(row.template_id, row.context_id, spec):
                             continue
                         info = self._instances.get(row.id)
                         if not info:
                             continue
-                        last_active = await terminal_last_active_at(row.template_id, row.context_id)
                         active_at = last_active.replace(tzinfo=timezone.utc).timestamp() if last_active else time.time()
                         idle = spec.get("idle_timeout_minutes", settings.idle_timeout_minutes)
                         lifetime = spec.get("max_lifetime_minutes", settings.max_lifetime_minutes)
@@ -176,4 +210,4 @@ class Backend(ABC):
                         if expired or (idle and idle > 0 and time.time() - active_at >= idle * 60):
                             await stop_instance(self, row.template_id, row.context_id)
             except Exception:
-                log.exception("Failed lifecycle sweep for %s", row.id)
+                log.exception("Failed lifecycle sweep for %s", key)

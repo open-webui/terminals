@@ -137,7 +137,7 @@ async def _resolve_instance(
                 port=info["port"], api_key=info["api_key"],
             )
         info = await backend.ensure_terminal(
-            template_id=template_id, context_id=context_id
+            template_id=template_id, context_id=context_id, record_activity=True
         )
     except TemplateNotFoundError as exc:
         raise HTTPException(404, "Template not found") from exc
@@ -145,7 +145,6 @@ async def _resolve_instance(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if info is None:
         raise RuntimeError(f"Failed to provision machine for user {user_id}")
-    await _touch_activity(backend, template_id, context_id)
     return InstanceInfo(
         host=info["host"],
         port=info["port"],
@@ -242,24 +241,20 @@ async def _proxy_request(
                 logger.debug("Proxy attempt {} to {} failed ({}), retrying...", attempt + 1, target_url, e)
                 await asyncio.sleep(1)
                 instance = await _try_resolve_instance(request, user_id, template_id, context_id)
-                if instance is None:
-                    return Response(
-                        content='{"error": "Machine is unreachable"}',
-                        status_code=502,
-                        media_type="application/json",
-                    )
-                target_url = f"http://{instance.host}:{instance.port}/{path}"
-                if request.query_params:
-                    target_url += f"?{request.query_params}"
-                headers["authorization"] = f"Bearer {instance.api_key}"
-                client = await _get_proxy_client(instance.host, instance.port)
+                if instance is not None:
+                    target_url = f"http://{instance.host}:{instance.port}/{path}"
+                    if request.query_params:
+                        target_url += f"?{request.query_params}"
+                    headers["authorization"] = f"Bearer {instance.api_key}"
+                    client = await _get_proxy_client(instance.host, instance.port)
+                    continue
             else:
                 logger.error("Proxy request to {} failed after {} retries: {}", target_url, max_retries, e)
-                return Response(
-                    content='{"error": "Machine is unreachable"}',
-                    status_code=502,
-                    media_type="application/json",
-                )
+            return Response(
+                content='{"error": "Machine is unreachable"}',
+                status_code=502,
+                media_type="application/json",
+            )
         except httpx.ReadTimeout as e:
             logger.warning(
                 "Proxy request to {} timed out waiting for upstream response: {}",
@@ -483,13 +478,12 @@ async def _relay_websocket(
                 logger.debug("WS connect attempt {} to {} failed ({}), retrying...", attempt + 1, upstream_url, e)
                 await asyncio.sleep(1)
                 instance = await _try_resolve_instance(ws, user_id, template_id, context_id, reraise_http=False)
-                if instance is None:
-                    await ws.close(code=4003, reason="Machine is unreachable")
-                    return
+                if instance is not None:
+                    continue
             else:
                 logger.error("WS connect to {} failed after {} retries: {}", upstream_url, max_retries, e)
-                await ws.close(code=4003, reason="Machine is unreachable")
-                return
+            await ws.close(code=4003, reason="Machine is unreachable")
+            return
 
     try:
         async with upstream:

@@ -8,6 +8,8 @@
 	let editing = $state<any>(null);
 	let configuration = $state('{}');
 	let lifecycle = $state('{}');
+	let retention = $state<number | null | 'custom'>(null);
+	let customMinutes = $state<number>();
 	const input = 'w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-gray-700';
 	const button = 'rounded-lg px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50';
 	async function api(path: string, method = 'GET', body: unknown = undefined) {
@@ -21,7 +23,11 @@
 	async function edit(template: any = null) {
 		await run(async () => {
 			editing = template ?? {id: crypto.randomUUID(), fresh: true, data: {name: '', scope: null}};
-			configuration = JSON.stringify(editing.data, null, 2);
+			const {retention_period_minutes: minutes, ...config} = editing.data;
+			retention = minutes ?? null;
+			if (minutes > 0 && minutes !== 20160) retention = 'custom';
+			customMinutes = minutes > 0 ? minutes : undefined;
+			configuration = JSON.stringify(config, null, 2);
 			lifecycle = JSON.stringify(template ? (await api(`/templates/${encodeURIComponent(template.id)}/lifecycle`)).data : {}, null, 2);
 		});
 	}
@@ -30,6 +36,9 @@
 		await run(async () => {
 			const form = new FormData(event.currentTarget as HTMLFormElement);
 			const data = {...JSON.parse(configuration), name: form.get('name'), scope: form.get('scope') || null};
+			if ('retention_period_minutes' in data) throw new Error('Use Retention period to set workspace retention.');
+			// An explicit null clears a previous override on PATCH.
+			data.retention_period_minutes = retention === 'custom' ? customMinutes : retention;
 			const schedule = JSON.parse(lifecycle);
 			if (editing.fresh) {await api('/templates', 'POST', {id: editing.id, data}); editing.fresh = false;}
 			else await api(`/templates/${encodeURIComponent(editing.id)}`, 'PATCH', data);
@@ -59,6 +68,18 @@
 		<h2 class="font-medium">{editing.fresh ? 'New machine' : 'Configure machine'}</h2>
 		<label class="block text-sm">Name<input class={input} name="name" value={editing.data.name ?? editing.id} required /></label>
 		<label class="block text-sm">Scope<select class={input} name="scope" value={editing.data.scope ?? ''}><option value="">None</option><option value="user">User</option><option value="chat">Chat</option><option value="model">Model</option></select></label>
+		<label class="block text-sm">Retention period
+			<select class={input} bind:value={retention} aria-describedby="retention-help">
+				<option value={null}>Server default</option>
+				<option value={0}>Never</option>
+				<option value={20160}>14 days</option>
+				<option value="custom">Custom duration</option>
+			</select>
+		</label>
+		{#if retention === 'custom'}
+			<label class="block text-sm">Retention in minutes<input class={input} type="number" min="1" step="1" required bind:value={customMinutes} /></label>
+		{/if}
+		<p id="retention-help" class="text-sm text-gray-600 dark:text-gray-400">After this much inactivity, the machine and its workspace files are deleted. This applies to existing workspaces. Choose Never to keep them indefinitely.</p>
 		<label class="block text-sm">Instance configuration<textarea class={`${input} font-mono`} rows="8" bind:value={configuration} /></label>
 		<label class="block text-sm">Lifecycle schedule<textarea class={`${input} font-mono`} rows="4" bind:value={lifecycle} /></label>
 		<div class="flex justify-end"><button type="button" class={button} onclick={() => editing = null}>Cancel</button><button class={button} disabled={busy}>Save</button></div>

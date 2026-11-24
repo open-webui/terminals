@@ -127,6 +127,7 @@ class Settings(BaseSettings):
 
     # Idle reaper — tear down terminals after N minutes of inactivity (0 = disabled)
     idle_timeout_minutes: int = 0
+    retention_period_minutes: int = Field(default=0, ge=0)
     idle_cleanup_timeout_seconds: float = 120
     # Hard cap — tear down terminals N minutes after they start, even if active (0 = disabled)
     max_lifetime_minutes: int = 0

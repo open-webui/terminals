@@ -38,7 +38,6 @@ from machines.utils.kubernetes_security import (
     restricted_enabled,
 )
 from machines.utils.kubernetes_scheduling import node_selector, tolerations
-from machines.utils.template_lifecycle import mark_terminal_active
 from machines.utils.image_pull import pull_policy
 
 log = logging.getLogger(__name__)
@@ -750,7 +749,7 @@ class KubernetesOperatorBackend(Backend):
 
         return None
 
-    async def touch_activity(
+    async def _touch_activity_locked(
         self,
         template_id: str,
         context_id: str = DEFAULT_CONTEXT_ID,
@@ -759,11 +758,8 @@ class KubernetesOperatorBackend(Backend):
         context_id = normalize_context_id(context_id)
         key = self._key(template_id, context_id)
         checked = self._last_activity_status_updated_at.get(key)
-        synced = self._activity_synced_at.get(key)
+        await super()._touch_activity_locked(template_id, context_id)
         interval = max(1, min(settings.status_cache_ttl or 30, 60))
-        if synced is None or time.monotonic() - synced >= interval:
-            await mark_terminal_active(template_id, context_id)
-            self._activity_synced_at[key] = time.monotonic()
         if checked is not None and time.monotonic() - checked < interval:
             return
 

@@ -256,29 +256,9 @@ async def mark_terminal_active(
         await session.commit()
 
 
-async def terminal_last_active_at(
-    template_id: str,
-    context_id: str = DEFAULT_CONTEXT_ID,
-) -> datetime | None:
-    """Return the latest persisted activity heartbeat for a terminal."""
-    if async_session is None:
-        return None
-
-    context_id = normalize_context_id(context_id)
-
-    from machines.models.template import TemplateLifecycleState
-
-    async with async_session() as session:
-        state_row = await session.execute(
-            select(TemplateLifecycleState).where(
-                TemplateLifecycleState.template_id == template_id,
-                TemplateLifecycleState.context_id == context_id,
-            )
-        )
-        state = state_row.scalar_one_or_none()
-        data = dict(state.data or {}) if state else {}
-        activity = dict(data.get(ACTIVITY_KEY) or {})
-        return _parse_iso(activity.get("last_seen_at"))
+def terminal_last_active_at(state) -> datetime | None:
+    activity = (state.data or {}).get(ACTIVITY_KEY) or {}
+    return _parse_iso(activity.get("last_seen_at"))
 
 
 async def get_lifecycle_data(template_id: str) -> dict:

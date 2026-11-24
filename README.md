@@ -178,6 +178,7 @@ curl -fsS http://localhost:3000/execute \
 | `storage` | Storage size, such as `"5Gi"`; behavior depends on the backend below |
 | `storage_mode` | Direct Kubernetes: `per-user`, `shared`, or `shared-rwo` |
 | `idle_timeout_minutes` | Stop machines after this many idle minutes; `0` disables idle cleanup |
+| `retention_period_minutes` | Delete a machine and its workspace files after this many minutes without machine activity. Omit to inherit the server default. Set to `0` to keep workspaces indefinitely. |
 | `max_lifetime_minutes` | Stop machines this many minutes after they start, even while in use; `0` disables the limit |
 | `restricted` | Restricted Kubernetes/OpenShift defaults |
 | `pod_security_context`, `container_security_context` | Kubernetes security context overrides |
@@ -242,7 +243,9 @@ Schedules support one-time ISO datetimes, `@weekly`, `@monthly`, and five-field 
 
 ## Storage and persistence
 
-Stopping or reaping a machine preserves its persisted files. Idle cleanup is disabled by default; enable it with `MACHINES_IDLE_TIMEOUT_MINUTES` or a template. A maximum lifetime, set with `MACHINES_MAX_LIFETIME_MINUTES` or a template, stops machines after a fixed time even while they are in use; the next request starts a fresh one with the same files. File resets and environment deletion are separate, destructive actions.
+Stopping a machine preserves its persisted files. Idle shutdown is disabled by default; enable it with `MACHINES_IDLE_TIMEOUT_MINUTES` or a template. A maximum lifetime, set with `MACHINES_MAX_LIFETIME_MINUTES` or a template, stops machines after a fixed time even while they are in use; the next request starts a fresh one with the same files. File resets and environment deletion are separate, destructive actions.
+
+Set the template's **Retention period** to delete inactive environments automatically. For example, `idle_timeout_minutes: 60` stops a machine after one idle hour and `retention_period_minutes: 20160` deletes its workspace 14 days after its last recorded machine activity. For a machine that has never been used, the period starts at creation. The lifecycle sweep checks running and stopped environments. Enabling or shortening retention can delete existing workspaces on the next sweep. Using the machine again after deletion creates a fresh workspace.
 
 | Backend | Persisted machine files |
 |---------|-------------------------|
@@ -351,6 +354,7 @@ Every `MACHINES_*` setting also accepts its `TERMINALS_*` name. You can mix pref
 | `MACHINES_MAX_STORAGE` | | Storage cap. Kubernetes enforces this with PVC sizes; Docker support depends on the storage driver and does not quota the bind-mounted `/home/user`. |
 | `MACHINES_ALLOWED_IMAGES` | | Comma-separated list of allowed image patterns |
 | `MACHINES_IDLE_TIMEOUT_MINUTES` | `0` | Minutes of inactivity before machines are torn down. `0` disables idle cleanup. |
+| `MACHINES_RETENTION_PERIOD_MINUTES` | `0` | Default retention period in minutes since last machine activity. `0` disables automatic deletion of workspaces. |
 | `MACHINES_MAX_LIFETIME_MINUTES` | `0` | Minutes after start before machines are torn down, even while in use. `0` disables the limit. |
 | `MACHINES_IDLE_CLEANUP_TIMEOUT_SECONDS` | `120` | Timeout for each teardown/reset call during idle cleanup |
 | `MACHINES_DATABASE_URL` | `sqlite+aiosqlite:////app/data/terminals.db` in the image | SQLAlchemy database URL. Source installs use `data/terminals.db` next to the package directory. PostgreSQL is optional. |

@@ -141,7 +141,13 @@ async def remove_home(backend, row, spec):
 
         home = backend._home_dir(row.template_id, row.context_id)
         if home.exists():
-            await asyncio.to_thread(shutil.rmtree, home)
+            removal = asyncio.create_task(asyncio.to_thread(shutil.rmtree, home))
+            try:
+                await asyncio.shield(removal)
+            except asyncio.CancelledError:
+                # The thread keeps deleting after a timeout. Hold the lock until it finishes.
+                await removal
+                raise
     elif settings.backend == "kubernetes" and spec.get(
         "storage_mode", settings.kubernetes_storage_mode
     ) in ("shared", "shared-rwo"):
@@ -175,6 +181,17 @@ async def remove_home(backend, row, spec):
                 await asyncio.sleep(0.2)
 
 
+async def delete_locked_instance(backend, row, spec):
+    """Delete the managed resources before forgetting the row. Caller holds the instance lock."""
+    from machines.db.session import async_session
+
+    await stop_instance(backend, row.template_id, row.context_id)
+    await remove_home(backend, row, spec)
+    async with async_session() as session:
+        await session.delete(row)
+        await session.commit()
+
+
 async def describe_instance(backend, row):
     status = await backend.status(f"terminal-{row.id}")
     return {
@@ -204,17 +221,16 @@ async def change_instance(backend, template_id, context_id, action):
         spec = await resolve_template_spec(template_id)
         async with async_session() as session:
             row = await session.get(TemplateLifecycleState, key)
-            if row is None:
-                if action == "delete":
-                    return
-                raise HTTPException(404, "Environment has not been created")
+        if row is None:
+            if action == "delete":
+                return
+            raise HTTPException(404, "Environment has not been created")
+        if action == "delete":
+            await delete_locked_instance(backend, row, spec)
+        else:
             await stop_instance(backend, row.template_id, row.context_id)
             if action == "reset":
                 await backend.reset(template_id, context_id, spec)
-            elif action == "delete":
-                await remove_home(backend, row, spec)
-                await session.delete(row)
-                await session.commit()
     if action == "restart":
         # Outside the locks: starting takes the same environment lock.
         await backend.ensure_terminal(template_id=template_id, context_id=context_id)

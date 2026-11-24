@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from machines.config import settings
 from machines.backends.base import ProvisioningError
@@ -45,6 +45,7 @@ class TemplateData(BaseModel):
     storage: Optional[str] = None
     storage_mode: Optional[str] = None
     idle_timeout_minutes: Optional[int] = None
+    retention_period_minutes: int | None = Field(default=None, ge=0, strict=True)
     max_lifetime_minutes: Optional[int] = None
     restricted: Optional[bool] = None
     pod_security_context: Optional[dict[str, Any]] = None
@@ -156,7 +157,7 @@ def _validate_lifecycle(data: dict) -> dict:
 from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError
 from machines.models.template import Template, TemplateLifecycle, TemplateLifecycleState
-from machines.utils.instances import instance_lock, change_instance, stop_instance, remove_home, describe_instance
+from machines.utils.instances import instance_lock, change_instance, delete_locked_instance, describe_instance
 from machines.utils.context import terminal_identity
 from machines.utils.template_specs import resolve_template_spec
 
@@ -238,11 +239,7 @@ async def delete_template(template_id: str, request: Request):
                 TemplateLifecycleState.template_id == template_id).order_by(TemplateLifecycleState.id)))
         for row in rows:
             async with instance_lock(row.id):
-                await stop_instance(request.app.state.backend, row.template_id, row.context_id)
-                await remove_home(request.app.state.backend, row, spec)
-                async with async_session() as session:
-                    await session.execute(delete(TemplateLifecycleState).where(TemplateLifecycleState.id == row.id))
-                    await session.commit()
+                await delete_locked_instance(request.app.state.backend, row, spec)
         async with async_session() as session:
             await session.execute(delete(TemplateLifecycle).where(TemplateLifecycle.template_id == template_id))
             await session.execute(delete(Template).where(Template.id == template_id))
