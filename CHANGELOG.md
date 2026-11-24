@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-24
+
+### Added
+
+- Added **Retention period** under **Configure machine**, with **Server default**, **Never**, **14 days**, and **Custom duration** choices. You can set a default for the whole service and override it for each template. Choose **Never** to keep that template's workspaces indefinitely.
+- With **14 days** selected, cleanup deletes the machine and its workspace files after 14 days without machine use, whether the machine is running or stopped. Using it again resets the countdown. Your chat stays, but returning after cleanup gives you a fresh workspace. For a machine that has never been used, the countdown starts when it is created.
+- Retention also applies to existing workspaces. Turning it on or shortening the period can delete workspaces already past the limit on the next cleanup check. Stopping an idle machine still keeps its files unless retention is enabled. Deleting a chat does not yet trigger workspace deletion.
+
+### Fixed
+
+- Fixed Docker file cleanup continuing after a timeout while the same workspace could be reopened. Reopening now waits for file removal to finish.
+
 ## [0.5.0] - 2026-11-23
 
 You'll now see **Machines API (Terminals)** in the admin page, browser tab, and docs, matching the Machines name in Open WebUI. **Your existing Terminals setup still works.** You can keep your connections, templates, saved files, scripts, and settings as they are. There's no need to rename everything or set it all up again.
