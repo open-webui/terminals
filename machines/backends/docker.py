@@ -99,7 +99,7 @@ class DockerBackend(Backend):
             "PublishAllPorts": not network_name,
         }
         if self._mounts:
-            host_config["Mounts"] = self._mounts
+            host_config["Mounts"] = [mount.for_instance(template_id, context_id) for mount in self._mounts]
         if (settings.log_level or "").strip().upper() in _QUIET_LOG_LEVELS:
             host_config["LogConfig"] = {"Type": "none"}
 
@@ -171,9 +171,11 @@ class DockerBackend(Backend):
 
         max_conflict_retries = 3
         container = None
+        created = False
         for attempt in range(max_conflict_retries + 1):
             try:
                 container = await docker.containers.run(config, name=workload_name)
+                created = True
                 break
             except aiodocker.exceptions.DockerError as exc:
                 if exc.status == 409 and attempt < max_conflict_retries:
@@ -217,13 +219,24 @@ class DockerBackend(Backend):
             raise RuntimeError(f"Failed to provision or adopt container {workload_name}")
 
         result = await self._extract_instance_info(container, workload_name, api_key)
-        await self._wait_until_ready(result, timeout=settings.provision_timeout_seconds)
+        try:
+            await self._wait_until_ready(result)
+        except ProvisioningError:
+            # Failed starts are never cached, so the idle reaper cannot stop them.
+            if created:
+                try:
+                    await container.delete(force=True)
+                except aiodocker.exceptions.DockerError as exc:
+                    if exc.status != 404:
+                        log.warning("Could not remove unready container %s: %s", workload_name, exc)
+            raise
         return result
 
-    async def _wait_until_ready(self, instance: dict, timeout: float) -> None:
+    async def _wait_until_ready(self, instance: dict) -> None:
         """Poll the container's /health endpoint until it responds."""
 
         url = f"http://{instance['host']}:{instance['port']}/health"
+        timeout = settings.provision_timeout_seconds
         try:
             async with asyncio.timeout(timeout), httpx.AsyncClient(timeout=3) as client:
                 while True:

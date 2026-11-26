@@ -1,9 +1,13 @@
 """Docker bind mount settings."""
 
+import hashlib
 import json
 import posixpath
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from machines.utils.context import get_terminal_id
 
 
 _UNSAFE_TARGETS = {
@@ -30,8 +34,31 @@ def _is_under(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
-def parse_docker_mounts(raw: str) -> list[dict[str, Any]]:
-    """Parse MACHINES_DOCKER_MOUNTS into Docker HostConfig.Mounts entries."""
+@dataclass(frozen=True)
+class DockerMount:
+    source: str
+    target: str
+    read_only: bool
+    isolated: bool
+
+    def for_instance(self, template_id: str, context_id: str) -> dict:
+        mount = {"Type": "bind", "Source": self.source, "Target": self.target, "ReadOnly": self.read_only}
+        if self.isolated:
+            if context_id.startswith("user:"):
+                key = context_id.removeprefix("user:")
+                # Keep user paths distinct on case-insensitive hosts and reserve terminal IDs.
+                safe_name = re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,254}", key)
+                if not safe_name or re.fullmatch(r"[0-9a-f]{32}", key):
+                    key = "~" + hashlib.sha256(key.encode()).hexdigest()
+            else:
+                key = get_terminal_id(template_id, context_id)
+            mount["Source"] = posixpath.join(self.source, key)
+            mount["BindOptions"] = {"CreateMountpoint": True}
+        return mount
+
+
+def parse_docker_mounts(raw: str) -> list[DockerMount]:
+    """Validate the extra Docker bind mounts at startup."""
     raw = (raw or "").strip()
     if not raw:
         return []
@@ -44,7 +71,7 @@ def parse_docker_mounts(raw: str) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise ValueError("MACHINES_DOCKER_MOUNTS must be a JSON array")
 
-    mounts: list[dict[str, Any]] = []
+    mounts: list[DockerMount] = []
     targets: list[str] = []
     for index, item in enumerate(data):
         if not isinstance(item, dict):
@@ -53,6 +80,7 @@ def parse_docker_mounts(raw: str) -> list[dict[str, Any]]:
         source = item.get("source")
         target = item.get("target")
         read_only = item.get("readOnly", True)
+        isolated = item.get("isolated", False)
 
         if not isinstance(source, str) or not source.strip():
             raise ValueError(f"MACHINES_DOCKER_MOUNTS[{index}].source is required")
@@ -60,6 +88,8 @@ def parse_docker_mounts(raw: str) -> list[dict[str, Any]]:
             raise ValueError(f"MACHINES_DOCKER_MOUNTS[{index}].target is required")
         if not isinstance(read_only, bool):
             raise ValueError(f"MACHINES_DOCKER_MOUNTS[{index}].readOnly must be a boolean")
+        if not isinstance(isolated, bool):
+            raise ValueError(f"MACHINES_DOCKER_MOUNTS[{index}].isolated must be a boolean")
 
         source = str(Path(source).expanduser())
         target = posixpath.normpath(target)
@@ -74,13 +104,6 @@ def parse_docker_mounts(raw: str) -> list[dict[str, Any]]:
             raise ValueError(f"MACHINES_DOCKER_MOUNTS[{index}].target overlaps another mount")
 
         targets.append(target)
-        mounts.append(
-            {
-                "Type": "bind",
-                "Source": source,
-                "Target": target,
-                "ReadOnly": read_only,
-            }
-        )
+        mounts.append(DockerMount(source, target, read_only, isolated))
 
     return mounts
