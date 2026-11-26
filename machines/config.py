@@ -65,6 +65,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MACHINES_DOCKER_NETWORK", "TERMINALS_DOCKER_NETWORK", "TERMINALS_NETWORK"),
     )
     docker_host: str = "127.0.0.1"  # address to reach published container ports
+    # Leave room in a 63-character DNS label for "-" and the 32-character instance ID.
+    docker_container_name_prefix: str = Field(default="terminal", pattern=r"^[A-Za-z0-9][A-Za-z0-9-]{0,29}$")
     docker_mounts: str = ""          # JSON array of extra Docker bind mounts
     docker_data_dir: str = Field(
         default=f"{_DEFAULT_DATA_DIR}/terminals",

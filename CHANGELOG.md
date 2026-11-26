@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-11-26
+
+### Added
+
+- Extra Docker folders can now be kept separate with `isolated: true`. User-scoped templates share a folder for the same user, while other scopes get a folder per machine. Existing extra folders stay shared unless you enable isolation. Restart affected machines through Machines API to apply the new folder setup.
+- You can now choose a Docker container-name prefix, such as `myteam`, instead of `terminal`. The default stays the same. Stop existing machines through Machines API before changing the prefix, then start them again to keep using their saved files.
+
+### Fixed
+
+- Fixed the first request failing when a Docker machine takes longer than 15 seconds to start. Machines API now waits until the machine is ready, for up to two minutes by default, and lets you adjust that wait. If startup times out, it reports the failure and removes the newly created container so the next attempt can start fresh. Saved workspace files are kept.
+- Fixed new machines failing to start on OpenShift because the supplied operator permissions were missing a required permission. Apply the updated operator deployment file to pick up the fix.
+
 ## [0.5.1] - 2026-11-24
 
 ### Added

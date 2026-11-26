@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from machines.config import settings
 from machines.db.session import engine
 
 @asynccontextmanager
@@ -68,7 +69,6 @@ async def stop_instance(backend, template_id, context_id):
     from machines.routers.proxy import close_instance_sessions
     from machines.utils.context import get_terminal_id
     await close_instance_sessions(get_terminal_id(template_id, context_id))
-    from machines.config import settings
 
     if settings.backend == "docker":
         from aiodocker.exceptions import DockerError
@@ -134,7 +134,6 @@ async def stop_instance(backend, template_id, context_id):
 
 
 async def remove_home(backend, row, spec):
-    from machines.config import settings
 
     if settings.backend == "docker":
         import shutil
@@ -193,7 +192,11 @@ async def delete_locked_instance(backend, row, spec):
 
 
 async def describe_instance(backend, row):
-    status = await backend.status(f"terminal-{row.id}")
+    if settings.backend == "docker":
+        name = backend._container_name(row.template_id, row.context_id)
+    else:
+        name = f"terminal-{row.id}"
+    status = await backend.status(name)
     return {
         "id": row.id,
         "template_id": row.template_id,

@@ -61,7 +61,7 @@
 </script>
 <svelte:head><title>Machines API (Terminals)</title></svelte:head>
 <main class="mx-auto max-w-5xl space-y-6 p-6 text-gray-900 dark:text-gray-100">
-	<header class="flex items-center justify-between"><h1 class="text-xl font-semibold">Machines API (Terminals) <span class="text-sm font-normal text-gray-500">0.5.1</span></h1><button class={button} disabled={busy} onclick={() => edit()}>New machine</button></header>
+	<header class="flex items-center justify-between"><h1 class="text-xl font-semibold">Machines API (Terminals) <span class="text-sm font-normal text-gray-500">0.5.2</span></h1><button class={button} disabled={busy} onclick={() => edit()}>New machine</button></header>
 	<form class="flex gap-2" onsubmit={(event) => {event.preventDefault(); sessionStorage.setItem('terminals-key', token); void run(load);}}><input class={input} type="password" bind:value={token} placeholder="Server key" aria-label="Server key" /><button class={button} disabled={busy}>Connect</button></form>
 	{#if error}<p role="alert" class="text-sm text-red-500">{error}</p>{/if}
 	{#if editing}<form class="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-gray-800" onsubmit={save}>

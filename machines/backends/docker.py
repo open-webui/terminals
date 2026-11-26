@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import logging
-import re
 import secrets
 import shutil
 from pathlib import Path
@@ -32,9 +31,6 @@ from machines.utils.image_pull import ensure_docker_image
 
 log = logging.getLogger(__name__)
 
-# Container name prefix used for discovery during reconciliation.
-_CONTAINER_PREFIX = "terminals-"
-_DNS_SAFE = re.compile(r"[^a-z0-9-]")
 _QUIET_LOG_LEVELS = {"WARNING", "ERROR", "CRITICAL"}
 
 
@@ -53,7 +49,7 @@ class DockerBackend(Backend):
 
     @staticmethod
     def _container_name(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> str:
-        return f"terminal-{get_terminal_id(template_id, context_id)}"
+        return f"{settings.docker_container_name_prefix}-{get_terminal_id(template_id, context_id)}"
 
     @staticmethod
     def _home_dir(template_id: str, context_id: str = DEFAULT_CONTEXT_ID) -> Path:

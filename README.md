@@ -374,6 +374,7 @@ Every `MACHINES_*` setting also accepts its `TERMINALS_*` name. You can mix pref
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MACHINES_DOCKER_HOST` | `127.0.0.1` | Host/IP that the orchestrator uses to reach published machine container ports |
+| `MACHINES_DOCKER_CONTAINER_NAME_PREFIX` | `terminal` | Prefix for container names, e.g. `myprefix` produces `myprefix-<instance-id>`. Use 1–30 letters, digits, or hyphens, starting with a letter or digit. Stop existing environments through Machines before changing the prefix so they can restart with the new names and their existing files. |
 | `MACHINES_DOCKER_NETWORK` | | Docker network for machine containers. Use a comma-separated list to shard machines across multiple Docker bridge networks. |
 | `MACHINES_DOCKER_MOUNTS` | | JSON array of extra bind mounts with `source`, `target`, and optional `readOnly` and `isolated` flags |
 | `MACHINES_DOCKER_DATA_DIR` | `data/terminals` (`/app/data/terminals` in the image) | Workspace directory accessible to the orchestrator, including file resets |

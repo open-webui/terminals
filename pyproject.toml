@@ -1,6 +1,6 @@
 [project]
 name = "terminals"
-version = "0.5.1"
+version = "0.5.2"
 description = "Multi-tenant machine orchestration."
 readme = "README.md"
 authors = [
