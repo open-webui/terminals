@@ -19,6 +19,9 @@ rules:
     - apiGroups: ["openwebui.com"]
       resources: ["terminals", "terminals/status"]
       verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    - apiGroups: ["openwebui.com"]
+      resources: ["terminals/finalizers"]
+      verbs: ["update"]
     # Pods, Services, PVCs, and API-key Secrets managed by the operator
     - apiGroups: [""]
       resources: ["pods", "services", "persistentvolumeclaims", "secrets"]
