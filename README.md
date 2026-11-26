@@ -367,7 +367,7 @@ Every `MACHINES_*` setting also accepts its `TERMINALS_*` name. You can mix pref
 | `MACHINES_PROXY_READ_TIMEOUT_SECONDS` | `360` | Timeout while waiting for upstream proxy responses. Set this above the maximum `/execute?wait` value for Machine (Open Terminal). |
 | `MACHINES_PROXY_WRITE_TIMEOUT_SECONDS` | `300` | Timeout while sending proxied request bodies upstream |
 | `MACHINES_PROXY_POOL_TIMEOUT_SECONDS` | `300` | Timeout while waiting for an upstream proxy connection from the pool |
-| `MACHINES_PROVISION_TIMEOUT_SECONDS` | `120` | Timeout waiting for machine readiness on the `kubernetes-operator` backend |
+| `MACHINES_PROVISION_TIMEOUT_SECONDS` | `120` | Timeout waiting for machine readiness on the `docker` and `kubernetes-operator` backends |
 
 ### Docker
 

@@ -12,7 +12,7 @@ from typing import Optional
 import aiodocker
 import httpx
 
-from machines.backends.base import Backend, parse_started_at
+from machines.backends.base import Backend, ProvisioningError, parse_started_at
 from machines.config import settings
 from machines.utils.template_specs import TemplateNotFoundError, resolve_template_spec
 from machines.utils.context import (
@@ -217,25 +217,28 @@ class DockerBackend(Backend):
             raise RuntimeError(f"Failed to provision or adopt container {workload_name}")
 
         result = await self._extract_instance_info(container, workload_name, api_key)
-        await self._wait_until_ready(result, timeout=15)
+        await self._wait_until_ready(result, timeout=settings.provision_timeout_seconds)
         return result
 
-    async def _wait_until_ready(self, instance: dict, timeout: int = 15) -> None:
+    async def _wait_until_ready(self, instance: dict, timeout: float) -> None:
         """Poll the container's /health endpoint until it responds."""
 
         url = f"http://{instance['host']}:{instance['port']}/health"
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                async with httpx.AsyncClient(timeout=3) as client:
-                    resp = await client.get(url)
-                    if resp.status_code == 200:
-                        log.info("Container %s is ready", instance["workload_name"])
-                        return
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
-        log.warning("Container %s did not become ready within %ds", instance["workload_name"], timeout)
+        try:
+            async with asyncio.timeout(timeout), httpx.AsyncClient(timeout=3) as client:
+                while True:
+                    try:
+                        resp = await client.get(url)
+                        if resp.status_code == 200:
+                            log.info("Container %s is ready", instance["workload_name"])
+                            return
+                    except httpx.TransportError:
+                        pass
+                    await asyncio.sleep(0.5)
+        except TimeoutError as exc:
+            raise ProvisioningError(
+                f"Container {instance['workload_name']} did not become ready within {timeout:g}s"
+            ) from exc
 
     async def _extract_instance_info(
         self,
